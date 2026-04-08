@@ -163,3 +163,19 @@ export interface HealthOut {
   version: string;
   environment: string;
 }
+
+// ─── SIP ──────────────────────────────────────────────────────────────────────
+
+export interface SipApplyRequest {
+  sip_account: string;
+  sip_password: string;
+  update_device?: boolean;
+}
+
+export interface AsteriskHealth {
+  status: string; // "configured" | "not_configured"
+  mode: string; // "local" | "ssh"
+  pjsip_conf: string;
+  pjsip_readable: boolean;
+  detail: string;
+}

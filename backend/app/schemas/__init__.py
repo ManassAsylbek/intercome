@@ -210,3 +210,18 @@ class ActionResult(BaseModel):
     message: str
     detail: Optional[str] = None
     latency_ms: Optional[float] = None
+
+
+# ─── SIP apply ────────────────────────────────────────────────────────────────
+
+
+class SipApplyRequest(BaseModel):
+    """Запрос на применение SIP-аккаунта в pjsip.conf."""
+    sip_account: str = Field(..., min_length=1, max_length=64,
+                             description="Номер аккаунта, например 1001 или 1002")
+    sip_password: str = Field(..., min_length=1, max_length=128,
+                              description="Пароль, который будет записан в pjsip.conf")
+    update_device: bool = Field(
+        True,
+        description="Если true — сохраняет sip_account и sip_password в записи устройства в БД",
+    )

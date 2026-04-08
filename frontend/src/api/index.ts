@@ -1,6 +1,7 @@
 import { apiClient } from "./client";
 import type {
   ActionResult,
+  AsteriskHealth,
   DashboardSummary,
   Device,
   DeviceCreate,
@@ -12,6 +13,7 @@ import type {
   RoutingRuleCreate,
   RoutingRuleListOut,
   RoutingRuleUpdate,
+  SipApplyRequest,
   SystemInfo,
   TokenResponse,
   User,
@@ -56,6 +58,11 @@ export const devicesApi = {
     apiClient
       .post<ActionResult>(`/devices/${id}/test-unlock`)
       .then((r) => r.data),
+
+  sipApply: (id: number, data: SipApplyRequest) =>
+    apiClient
+      .post<ActionResult>(`/devices/${id}/sip-apply`, data)
+      .then((r) => r.data),
 };
 
 // ─── Routing Rules ────────────────────────────────────────────────────────────
@@ -88,4 +95,8 @@ export const dashboardApi = {
 export const systemApi = {
   health: () => apiClient.get<HealthOut>("/health").then((r) => r.data),
   info: () => apiClient.get<SystemInfo>("/system/info").then((r) => r.data),
+  asteriskHealth: () =>
+    apiClient
+      .get<AsteriskHealth>("/system/asterisk-health")
+      .then((r) => r.data),
 };

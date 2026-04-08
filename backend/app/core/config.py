@@ -33,6 +33,20 @@ class Settings(BaseSettings):
     server_port: int = 8000
     server_ip: str = "192.168.31.132"
 
+    # Asterisk integration
+    asterisk_mode: str = "local"            # "local" | "ssh" | "ami"
+    asterisk_pjsip_conf: str = "/etc/asterisk/pjsip.conf"
+    asterisk_reload_cmd: str = "sudo systemctl restart asterisk"
+    asterisk_ssh_host: str = ""
+    asterisk_ssh_port: int = 22
+    asterisk_ssh_user: str = ""
+    asterisk_ssh_key_file: str = ""
+    # AMI (Asterisk Manager Interface)
+    asterisk_ami_host: str = "127.0.0.1"
+    asterisk_ami_port: int = 5038
+    asterisk_ami_user: str = "intercom"
+    asterisk_ami_secret: str = "intercom-ami-secret"
+
     # Logging
     log_level: str = "INFO"
     log_format: str = "json"

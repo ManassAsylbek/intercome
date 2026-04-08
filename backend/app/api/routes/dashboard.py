@@ -16,6 +16,7 @@ from app.schemas import (
     HealthOut,
     SystemInfoOut,
 )
+from app.services.sip_service import sip_service
 
 router = APIRouter(tags=["dashboard"])
 
@@ -38,6 +39,12 @@ async def system_info(_: User = Depends(get_current_user)):
         app_env=settings.app_env,
         version="0.1.0",
     )
+
+
+@router.get("/system/asterisk-health")
+async def asterisk_health(_: User = Depends(get_current_user)):
+    """Возвращает статус подключения к Asterisk (pjsip.conf доступен?)."""
+    return await sip_service.health_check()
 
 
 @router.get("/dashboard/summary", response_model=DashboardSummary)

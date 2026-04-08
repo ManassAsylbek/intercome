@@ -23,3 +23,12 @@ export function useHealth() {
     refetchInterval: 60_000,
   });
 }
+
+export function useAsteriskHealth() {
+  return useQuery({
+    queryKey: ["asterisk-health"],
+    queryFn: () => systemApi.asteriskHealth(),
+    refetchInterval: 30_000,
+    retry: 1,
+  });
+}

@@ -16,8 +16,10 @@ from app.schemas import (
     DeviceListOut,
     DeviceOut,
     DeviceUpdate,
+    SipApplyRequest,
 )
 from app.services import connectivity_service, device_service, unlock_service
+from app.services.sip_service import sip_service
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -107,3 +109,51 @@ async def test_unlock(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return await unlock_service.test_unlock(device, db=db, actor=current_user.username)
+
+
+@router.post("/{device_id}/sip-apply", response_model=ActionResult)
+async def sip_apply(
+    device_id: int,
+    payload: SipApplyRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Применяет SIP-аккаунт в pjsip.conf на сервере Asterisk и перезагружает его.
+    Если update_device=true — также сохраняет sip_account/sip_password в БД устройства.
+    """
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+
+    result = sip_service.apply_credentials(
+        acct=payload.sip_account,
+        password=payload.sip_password,
+    )
+
+    if result.success and payload.update_device:
+        await device_service.update_device(
+            db,
+            device,
+            DeviceUpdate(
+                sip_enabled=True,
+                sip_account=payload.sip_account,
+                sip_password=payload.sip_password,
+            ),
+            actor=current_user.username,
+        )
+
+    return result
+
+
+@router.get("/{device_id}/sip-status", response_model=dict)
+async def sip_status(
+    device_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Возвращает статус SIP-пира из Asterisk (пока заглушка)."""
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return await sip_service.get_peer_status(device.sip_account or str(device_id))

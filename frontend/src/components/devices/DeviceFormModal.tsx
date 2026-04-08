@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useForm, Controller, type SubmitHandler } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Input, Select, Textarea, Checkbox } from "@/components/ui/FormFields";
 import { useCreateDevice, useUpdateDevice } from "@/hooks/useDevices";
 import { toast } from "@/components/ui/Toast";
+import { devicesApi } from "@/api";
 import type { Device } from "@/types";
 
 const schema = z.object({
@@ -54,6 +55,11 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
   const isEdit = !!device;
   const create = useCreateDevice();
   const update = useUpdateDevice(device?.id ?? 0);
+  const [sipApplying, setSipApplying] = useState(false);
+  const [sipApplyResult, setSipApplyResult] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
 
   const {
     register,
@@ -112,6 +118,36 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
       onClose();
     } catch {
       toast("Failed to save device", "error");
+    }
+  };
+
+  const handleSipApply = async () => {
+    if (!device?.id) return;
+    const account = watch("sip_account");
+    const password = watch("sip_password");
+    if (!account || !password) {
+      toast("Fill in SIP Account and Password first", "error");
+      return;
+    }
+    setSipApplying(true);
+    setSipApplyResult(null);
+    try {
+      const result = await devicesApi.sipApply(device.id, {
+        sip_account: account,
+        sip_password: password,
+        update_device: true,
+      });
+      setSipApplyResult(result);
+      if (result.success) {
+        toast("Applied to Asterisk ✓", "success");
+      } else {
+        toast(result.message, "error");
+      }
+    } catch {
+      setSipApplyResult({ success: false, message: "Network error" });
+      toast("Failed to apply SIP credentials", "error");
+    } finally {
+      setSipApplying(false);
     }
   };
 
@@ -208,7 +244,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
             <div className="grid grid-cols-2 gap-4">
               <Input
                 label="SIP Account"
-                placeholder="door001"
+                placeholder="1001"
                 {...register("sip_account")}
               />
               <Input
@@ -219,7 +255,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
               />
               <Input
                 label="SIP Server"
-                placeholder="192.168.31.132"
+                placeholder="192.168.50.132"
                 {...register("sip_server")}
               />
               <Input
@@ -235,6 +271,37 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
                   {...register("sip_proxy")}
                 />
               </div>
+              {isEdit && (
+                <div className="col-span-2 pt-1">
+                  <div className="flex items-center gap-3">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      loading={sipApplying}
+                      onClick={handleSipApply}
+                    >
+                      Apply to Asterisk (pjsip.conf)
+                    </Button>
+                    {sipApplyResult && (
+                      <span
+                        className={`text-xs font-medium px-2 py-1 rounded-md ${
+                          sipApplyResult.success
+                            ? "bg-green-50 text-green-700"
+                            : "bg-red-50 text-red-600"
+                        }`}
+                      >
+                        {sipApplyResult.success ? "✓ " : "✗ "}
+                        {sipApplyResult.message}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Записывает аккаунт в pjsip.conf на сервере Asterisk и
+                    перезагружает его. Режим настраивается в backend/.env
+                    (ASTERISK_MODE=local|ssh).
+                  </p>
+                </div>
+              )}
             </div>
           )}
         </section>

@@ -1,10 +1,27 @@
 import axios from "axios";
 
-const BASE_URL = "/api";
+// В Docker/production: фронт и бэк на одном хосте, nginx проксирует /api/ → backend
+// В dev: берём из VITE_API_URL или используем текущий хост:8000/api
+function resolveBaseUrl(): string {
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  // Если открыт через браузер — используем тот же хост, nginx отдаёт /api/
+  const { protocol, hostname, port } = window.location;
+  // dev vite (порт 5173) → бэкенд на 8000
+  if (port === "5173" || port === "3000") {
+    return `${protocol}//${hostname}:8000/api`;
+  }
+  // production (порт 80/443) → nginx проксирует /api/
+  return `${protocol}//${hostname}${port ? `:${port}` : ""}/api`;
+}
+
+const BASE_URL = resolveBaseUrl();
 
 export const apiClient = axios.create({
   baseURL: BASE_URL,
   headers: { "Content-Type": "application/json" },
+  timeout: 5000,
 });
 
 // Attach token to every request

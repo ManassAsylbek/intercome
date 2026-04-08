@@ -1,6 +1,28 @@
 version: "3.9"
 
+# Скопируйте .env.example → .env и задайте SERVER_IP перед запуском:
+#   cp .env.example .env
+#   docker compose up -d
+
 services:
+  asterisk:
+    image: andrius/asterisk:latest
+    container_name: intercom-asterisk
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./docker/asterisk/pjsip.conf:/etc/asterisk/pjsip.conf
+      - ./docker/asterisk/extensions.conf:/etc/asterisk/extensions.conf
+      - ./docker/asterisk/asterisk.conf:/etc/asterisk/asterisk.conf
+      - ./docker/asterisk/manager.conf:/etc/asterisk/manager.conf
+      - ./docker/asterisk/rtp.conf:/etc/asterisk/rtp.conf
+    healthcheck:
+      test: ["CMD", "asterisk", "-rx", "core show version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   backend:
     build:
       context: ./backend
@@ -10,15 +32,29 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - APP_ENV=production
-      - APP_SECRET_KEY=${APP_SECRET_KEY:-change-me-in-production}
+      - APP_ENV=${APP_ENV:-production}
+      - APP_SECRET_KEY=${APP_SECRET_KEY:-change-me-32-chars-minimum-here!}
       - DATABASE_URL=sqlite+aiosqlite:///./data/intercom.db
-      - APP_CORS_ORIGINS=http://localhost,http://localhost:80
-      - SERVER_IP=${SERVER_IP:-192.168.31.132}
+      - APP_CORS_ORIGINS=${APP_CORS_ORIGINS:-http://localhost,http://localhost:80}
+      - SERVER_IP=${SERVER_IP:-127.0.0.1}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - ASTERISK_MODE=${ASTERISK_MODE:-local}
+      - ASTERISK_PJSIP_CONF=${ASTERISK_PJSIP_CONF:-/etc/asterisk/pjsip.conf}
+      - ASTERISK_RELOAD_CMD=${ASTERISK_RELOAD_CMD:-}
+      - ASTERISK_SSH_HOST=${ASTERISK_SSH_HOST:-}
+      - ASTERISK_SSH_PORT=${ASTERISK_SSH_PORT:-22}
+      - ASTERISK_SSH_USER=${ASTERISK_SSH_USER:-}
+      - ASTERISK_SSH_KEY_FILE=${ASTERISK_SSH_KEY_FILE:-}
+      - ASTERISK_AMI_HOST=${ASTERISK_AMI_HOST:-127.0.0.1}
+      - ASTERISK_AMI_PORT=${ASTERISK_AMI_PORT:-5038}
+      - ASTERISK_AMI_USER=${ASTERISK_AMI_USER:-intercom}
+      - ASTERISK_AMI_SECRET=${ASTERISK_AMI_SECRET:-intercom-ami-secret}
     volumes:
       - intercom-data:/app/data
+      - ./docker/asterisk/pjsip.conf:/etc/asterisk/pjsip.conf # shared with asterisk
+      - /var/run/docker.sock:/var/run/docker.sock # для asterisk reload
+      - ./docker/bin/docker:/usr/local/bin/docker:ro # linux docker CLI
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -30,10 +66,13 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # nginx проксирует /api/ → backend, VITE_API_URL не нужен в prod
+        - VITE_API_URL=
     container_name: intercom-frontend
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "${FRONTEND_PORT:-80}:80"
     depends_on:
       backend:
         condition: service_healthy
