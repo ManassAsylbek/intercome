@@ -16,6 +16,7 @@ services:
       - ./docker/asterisk/asterisk.conf:/etc/asterisk/asterisk.conf
       - ./docker/asterisk/manager.conf:/etc/asterisk/manager.conf
       - ./docker/asterisk/rtp.conf:/etc/asterisk/rtp.conf
+      - ./docker/asterisk/http.conf:/etc/asterisk/http.conf
     healthcheck:
       test: ["CMD", "asterisk", "-rx", "core show version"]
       interval: 30s
@@ -73,9 +74,36 @@ services:
     restart: unless-stopped
     ports:
       - "${FRONTEND_PORT:-80}:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/server.crt:/etc/nginx/ssl/server.crt:ro
+      - ./docker/nginx/server.key:/etc/nginx/ssl/server.key:ro
     depends_on:
       backend:
         condition: service_healthy
+
+  # Local STUN server — браузер получает реальный LAN-IP в ICE-кандидатах
+  # (без него HTTPS-страница даёт mDNS *.local кандидаты, которые Asterisk не резолвит)
+  coturn:
+    image: coturn/coturn:latest
+    container_name: intercom-coturn
+    restart: unless-stopped
+    network_mode: host
+    command: >
+      -n
+      --no-tls
+      --no-dtls
+      --no-auth
+      --log-file=stdout
+      --listening-port=3478
+
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: intercom-go2rtc
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./docker/go2rtc/go2rtc.yaml:/config/go2rtc.yaml:ro
 
 volumes:
   intercom-data:

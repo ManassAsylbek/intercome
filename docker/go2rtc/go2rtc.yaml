@@ -1,0 +1,10 @@
+streams:
+  door:
+    - rtsp://admin:123456@192.168.50.31:554/h264
+
+api:
+  listen: ":1984"
+  origin: "*"
+
+webrtc:
+  listen: ":8555"

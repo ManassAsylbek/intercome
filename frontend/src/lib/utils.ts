@@ -39,4 +39,6 @@ export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
   rule_created: "Rule Created",
   rule_updated: "Rule Updated",
   rule_deleted: "Rule Deleted",
+  door_call: "🔔 Door Call",
+  door_call_end: "📵 Call Ended",
 };

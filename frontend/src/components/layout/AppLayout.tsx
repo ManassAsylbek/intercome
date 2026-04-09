@@ -1,5 +1,9 @@
+import { useState, useEffect, useRef, useCallback } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import { useCallEvents } from "@/hooks/useCallEvents";
+import { useSIPClient, type SIPCallState } from "@/hooks/useSIPClient";
+import { CallBanner } from "@/components/ui/CallBanner";
 import { cn } from "@/lib/utils";
 import {
   LayoutDashboard,
@@ -19,9 +23,70 @@ const navItems = [
 
 export function AppLayout() {
   const { user, logout } = useAuth();
+  const { activeCall } = useCallEvents();
+  const [dismissed, setDismissed] = useState(false);
+  const [sipState, setSipState] = useState<SIPCallState>("idle");
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
+
+  const { answer: sipAnswer, hangup } = useSIPClient({
+    onStateChange: setSipState,
+    onRemoteStream: setRemoteStream,
+  });
+
+  // Whenever remote stream arrives (even late), assign to audio and play
+  useEffect(() => {
+    const el = remoteAudioRef.current;
+    if (!el || !remoteStream) return;
+    console.log(
+      "[audio] Got remote stream, tracks:",
+      remoteStream.getTracks().map((t) => `${t.kind}:${t.readyState}`),
+    );
+    el.srcObject = remoteStream;
+    el.muted = false;
+    el.volume = 1.0;
+    el.play()
+      .then(() => console.log("[audio] Playing remote stream OK"))
+      .catch((e) => console.error("[audio] play error:", e));
+  }, [remoteStream]);
+
+  // Stop audio on call end
+  useEffect(() => {
+    if (sipState === "idle" || sipState === "ended") {
+      const el = remoteAudioRef.current;
+      if (el) {
+        el.pause();
+        el.srcObject = null;
+      }
+      setRemoteStream(null);
+    }
+  }, [sipState]);
+
+  // answer() runs inside user gesture — browser will allow play()
+  const answer = useCallback(() => {
+    sipAnswer();
+  }, [sipAnswer]);
+
+  // Reset dismiss state when a new call comes in
+  useEffect(() => {
+    if (activeCall) setDismissed(false);
+  }, [activeCall?.call_id]);
+
+  const showBanner =
+    (activeCall && !dismissed) ||
+    sipState === "ringing" ||
+    sipState === "active";
 
   return (
     <div className="flex h-screen bg-gray-50">
+      {/* Hidden audio element for SIP remote audio */}
+      <audio
+        ref={remoteAudioRef}
+        autoPlay
+        muted={false}
+        style={{ display: "none" }}
+      />
+
       {/* Sidebar */}
       <aside className="w-60 bg-gray-900 flex flex-col">
         {/* Logo */}
@@ -82,6 +147,17 @@ export function AppLayout() {
       <main className="flex-1 overflow-y-auto">
         <Outlet />
       </main>
+
+      {/* Call notification banner — show when SSE call OR SIP ringing/active */}
+      {showBanner && (
+        <CallBanner
+          call={activeCall ?? null}
+          sipState={sipState}
+          onDismiss={() => setDismissed(true)}
+          onAnswer={answer}
+          onHangup={hangup}
+        />
+      )}
     </div>
   );
 }

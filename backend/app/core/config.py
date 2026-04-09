@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # Server
     server_host: str = "0.0.0.0"
     server_port: int = 8000
-    server_ip: str = "192.168.31.132"
+    server_ip: str = "192.168.50.132"
 
     # Asterisk integration
     asterisk_mode: str = "local"            # "local" | "ssh" | "ami"

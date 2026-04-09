@@ -18,7 +18,9 @@ export type ActivityAction =
   | "login"
   | "rule_created"
   | "rule_updated"
-  | "rule_deleted";
+  | "rule_deleted"
+  | "door_call"
+  | "door_call_end";
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 

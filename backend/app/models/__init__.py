@@ -52,6 +52,8 @@ class ActivityAction(str, enum.Enum):
     RULE_CREATED = "rule_created"
     RULE_UPDATED = "rule_updated"
     RULE_DELETED = "rule_deleted"
+    DOOR_CALL = "door_call"
+    DOOR_CALL_END = "door_call_end"
 
 
 # ─── Models ───────────────────────────────────────────────────────────────────
