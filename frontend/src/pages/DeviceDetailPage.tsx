@@ -49,7 +49,7 @@ function ResultBanner({ result }: { result: ActionResult }) {
         )}
         {result.latency_ms != null && (
           <p className="text-xs mt-0.5 opacity-60">
-            Latency: {formatLatency(result.latency_ms)}
+            Задержка: {formatLatency(result.latency_ms)}
           </p>
         )}
       </div>
@@ -118,8 +118,9 @@ export function DeviceDetailPage() {
     navigate("/devices");
   };
 
-  if (isLoading) return <div className="p-8 text-gray-400">Loading…</div>;
-  if (!device) return <div className="p-8 text-red-500">Device not found.</div>;
+  if (isLoading) return <div className="p-8 text-gray-400">Загрузка…</div>;
+  if (!device)
+    return <div className="p-8 text-red-500">Устройство не найдено.</div>;
 
   return (
     <div className="p-8 space-y-6 max-w-4xl">
@@ -148,10 +149,10 @@ export function DeviceDetailPage() {
             size="sm"
             onClick={() => setEditOpen(true)}
           >
-            <Pencil className="w-4 h-4" /> Edit
+            <Pencil className="w-4 h-4" /> Редактировать
           </Button>
           <Button variant="danger" size="sm" onClick={handleDelete}>
-            <Trash2 className="w-4 h-4" /> Delete
+            <Trash2 className="w-4 h-4" /> Удалить
           </Button>
         </div>
       </div>
@@ -159,7 +160,7 @@ export function DeviceDetailPage() {
       {/* Actions */}
       <Card>
         <CardHeader>
-          <CardTitle>Actions</CardTitle>
+          <CardTitle>Действия</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex gap-3">
@@ -169,7 +170,7 @@ export function DeviceDetailPage() {
                 onClick={handleTestConn}
                 loading={testConnection.isPending}
               >
-                <Wifi className="w-4 h-4" /> Test Connection
+                <Wifi className="w-4 h-4" /> Проверить соединение
               </Button>
               {connResult && <ResultBanner result={connResult} />}
             </div>
@@ -180,7 +181,7 @@ export function DeviceDetailPage() {
                   onClick={handleTestUnlock}
                   loading={testUnlock.isPending}
                 >
-                  <Unlock className="w-4 h-4" /> Test Unlock
+                  <Unlock className="w-4 h-4" /> Тест открытия
                 </Button>
                 {unlockResult && <ResultBanner result={unlockResult} />}
               </div>
@@ -193,13 +194,16 @@ export function DeviceDetailPage() {
         {/* Network */}
         <Card>
           <CardHeader>
-            <CardTitle>Network</CardTitle>
+            <CardTitle>Сеть</CardTitle>
           </CardHeader>
           <CardContent>
             <dl className="space-y-3">
-              <Field label="IP Address" value={device.ip_address} />
-              <Field label="Web Port" value={device.web_port} />
-              <Field label="Last Seen" value={formatDate(device.last_seen)} />
+              <Field label="IP-адрес" value={device.ip_address} />
+              <Field label="Веб-порт" value={device.web_port} />
+              <Field
+                label="Последная активность"
+                value={formatDate(device.last_seen)}
+              />
             </dl>
           </CardContent>
         </Card>
@@ -208,7 +212,7 @@ export function DeviceDetailPage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              SIP Configuration
+              SIP-конфигурация
               {device.sip_enabled ? (
                 <Badge variant="green">Enabled</Badge>
               ) : (
@@ -219,13 +223,13 @@ export function DeviceDetailPage() {
           <CardContent>
             {device.sip_enabled ? (
               <dl className="space-y-3">
-                <Field label="SIP Account" value={device.sip_account} />
-                <Field label="SIP Server" value={device.sip_server} />
-                <Field label="SIP Port" value={device.sip_port} />
-                <Field label="SIP Proxy" value={device.sip_proxy} />
+                <Field label="SIP-аккаунт" value={device.sip_account} />
+                <Field label="SIP-сервер" value={device.sip_server} />
+                <Field label="SIP-порт" value={device.sip_port} />
+                <Field label="SIP-прокси" value={device.sip_proxy} />
               </dl>
             ) : (
-              <p className="text-sm text-gray-400">SIP not configured</p>
+              <p className="text-sm text-gray-400">SIP не настроен</p>
             )}
           </CardContent>
         </Card>
@@ -234,7 +238,7 @@ export function DeviceDetailPage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              RTSP Stream
+              Видеопоток RTSP
               {device.rtsp_enabled ? (
                 <Badge variant="green">Enabled</Badge>
               ) : (
@@ -246,14 +250,14 @@ export function DeviceDetailPage() {
             {device.rtsp_enabled && device.rtsp_url ? (
               <div>
                 <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">
-                  RTSP URL
+                  RTSP адрес
                 </p>
                 <p className="text-sm font-mono text-gray-900 break-all">
                   {device.rtsp_url}
                 </p>
               </div>
             ) : (
-              <p className="text-sm text-gray-400">RTSP not configured</p>
+              <p className="text-sm text-gray-400">RTSP не настроен</p>
             )}
           </CardContent>
         </Card>
@@ -262,7 +266,7 @@ export function DeviceDetailPage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              Door Unlock
+              Открытие двери
               {device.unlock_enabled ? (
                 <Badge variant="green">Enabled</Badge>
               ) : (
@@ -274,14 +278,14 @@ export function DeviceDetailPage() {
             {device.unlock_enabled ? (
               <dl className="space-y-3">
                 <Field
-                  label="Method"
+                  label="Метод"
                   value={UNLOCK_METHOD_LABELS[device.unlock_method]}
                 />
-                <Field label="Unlock URL" value={device.unlock_url} />
-                <Field label="Username" value={device.unlock_username} />
+                <Field label="URL открытия" value={device.unlock_url} />
+                <Field label="Пользователь" value={device.unlock_username} />
               </dl>
             ) : (
-              <p className="text-sm text-gray-400">Unlock not configured</p>
+              <p className="text-sm text-gray-400">Открытие не настроено</p>
             )}
           </CardContent>
         </Card>
@@ -290,7 +294,7 @@ export function DeviceDetailPage() {
       {device.notes && (
         <Card>
           <CardHeader>
-            <CardTitle>Notes</CardTitle>
+            <CardTitle>Примечания</CardTitle>
           </CardHeader>
           <CardContent>
             <p className="text-sm text-gray-700">{device.notes}</p>
@@ -299,8 +303,8 @@ export function DeviceDetailPage() {
       )}
 
       <div className="text-xs text-gray-400 flex gap-4">
-        <span>Created: {formatDate(device.created_at)}</span>
-        <span>Updated: {formatDate(device.updated_at)}</span>
+        <span>Создано: {formatDate(device.created_at)}</span>
+        <span>Обновлено: {formatDate(device.updated_at)}</span>
       </div>
 
       <DeviceFormModal

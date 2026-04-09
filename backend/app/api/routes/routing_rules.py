@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,11 +13,13 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models import ActivityAction, ActivityLog, RoutingRule, User
 from app.schemas import (
+    ActionResult,
     RoutingRuleCreate,
     RoutingRuleListOut,
     RoutingRuleOut,
     RoutingRuleUpdate,
 )
+from app.services.sip_service import sip_service
 
 router = APIRouter(prefix="/routing-rules", tags=["routing-rules"])
 
@@ -27,6 +31,29 @@ async def _get_rule(db: AsyncSession, rule_id: int) -> RoutingRule | None:
         .where(RoutingRule.id == rule_id)
     )
     return result.scalar_one_or_none()
+
+
+async def _rebuild_dialplan(db: AsyncSession) -> None:
+    """Load all enabled rules from DB and regenerate extensions.conf in background."""
+    result = await db.execute(
+        select(RoutingRule)
+        .where(RoutingRule.enabled == True)  # noqa: E712
+        .order_by(RoutingRule.priority.desc(), RoutingRule.id)
+    )
+    rules = result.scalars().all()
+
+    # Group by call_code → list of target SIP accounts
+    rules_by_code: dict[str, list[str]] = {}
+    for rule in rules:
+        if not rule.call_code or not rule.target_sip_account:
+            continue
+        rules_by_code.setdefault(rule.call_code, [])
+        if rule.target_sip_account not in rules_by_code[rule.call_code]:
+            rules_by_code[rule.call_code].append(rule.target_sip_account)
+
+    # Run blocking file I/O in thread pool so async loop is not blocked
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, sip_service.generate_extensions_conf, rules_by_code)
 
 
 @router.get("", response_model=RoutingRuleListOut)
@@ -66,6 +93,8 @@ async def create_rule(
 
     # Reload with relationships
     rule = await _get_rule(db, rule.id)
+    await db.commit()
+    await _rebuild_dialplan(db)
     return rule
 
 
@@ -103,7 +132,10 @@ async def update_rule(
     )
     db.add(log)
     await db.flush()
-    return await _get_rule(db, rule_id)
+    result = await _get_rule(db, rule_id)
+    await db.commit()
+    await _rebuild_dialplan(db)
+    return result
 
 
 @router.delete("/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -124,3 +156,15 @@ async def delete_rule(
     )
     db.add(log)
     await db.delete(rule)
+    await db.commit()
+    await _rebuild_dialplan(db)
+
+
+@router.post("/sync-dialplan", response_model=ActionResult)
+async def sync_dialplan(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Вручную пересгенерировать extensions.conf из текущих правил и перезагрузить dialplan."""
+    await _rebuild_dialplan(db)
+    return ActionResult(success=True, message="Dialplan синхронизирован")

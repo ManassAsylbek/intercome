@@ -181,3 +181,42 @@ export interface AsteriskHealth {
   pjsip_readable: boolean;
   detail: string;
 }
+
+// ─── Apartments ───────────────────────────────────────────────────────────────
+
+export interface ApartmentMonitor {
+  id: number;
+  sip_account: string;
+  label: string | null;
+}
+
+export interface ApartmentMonitorIn {
+  sip_account: string;
+  label: string | null;
+}
+
+export interface Apartment {
+  id: number;
+  number: string;
+  call_code: string;
+  notes: string | null;
+  enabled: boolean;
+  monitors: ApartmentMonitor[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApartmentCreate {
+  number: string;
+  call_code: string;
+  notes?: string | null;
+  enabled: boolean;
+  monitors: ApartmentMonitorIn[];
+}
+
+export type ApartmentUpdate = Partial<ApartmentCreate>;
+
+export interface ApartmentListOut {
+  items: Apartment[];
+  total: number;
+}

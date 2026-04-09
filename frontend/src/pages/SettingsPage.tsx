@@ -1,6 +1,10 @@
+import { useState } from "react";
 import { useSystemInfo, useAsteriskHealth } from "@/hooks/useDashboard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { toast } from "@/components/ui/Toast";
+import { apiClient } from "@/api/client";
 import {
   Settings,
   Server,
@@ -9,6 +13,7 @@ import {
   CheckCircle2,
   XCircle,
   Wifi,
+  RefreshCw,
 } from "lucide-react";
 
 function InfoRow({ label, value }: { label: string; value: string }) {
@@ -32,14 +37,38 @@ function StatusDot({ ok }: { ok: boolean }) {
 
 export function SettingsPage() {
   const { data: sysInfo } = useSystemInfo();
-  const { data: asterisk, isLoading: asteriskLoading } = useAsteriskHealth();
+  const {
+    data: asterisk,
+    isLoading: asteriskLoading,
+    refetch,
+  } = useAsteriskHealth();
+  const [reloading, setReloading] = useState(false);
 
   const asteriskOk = asterisk?.status === "configured";
+
+  const handleAsteriskReload = async () => {
+    setReloading(true);
+    try {
+      const res = await apiClient.post<{ success: boolean; message: string }>(
+        "/system/asterisk-reload",
+      );
+      if (res.data.success) {
+        toast(res.data.message, "success");
+      } else {
+        toast(res.data.message, "error");
+      }
+      refetch();
+    } catch {
+      toast("Ошибка при перезагрузке Asterisk", "error");
+    } finally {
+      setReloading(false);
+    }
+  };
 
   return (
     <div className="p-8 space-y-6 max-w-3xl">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Настройки</h1>
         <p className="text-gray-500 text-sm mt-1">
           Конфигурация сервера и статус интеграций
         </p>
@@ -49,25 +78,25 @@ export function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Server className="w-4 h-4" /> Server Information
+            <Server className="w-4 h-4" /> Информация о сервере
           </CardTitle>
         </CardHeader>
         <CardContent>
           {sysInfo ? (
             <div>
-              <InfoRow label="Server IP" value={sysInfo.server_ip} />
-              <InfoRow label="Environment" value={sysInfo.app_env} />
-              <InfoRow label="Version" value={sysInfo.version} />
-              <InfoRow label="Database" value={sysInfo.database_url_safe} />
+              <InfoRow label="IP-адрес сервера" value={sysInfo.server_ip} />
+              <InfoRow label="Среда" value={sysInfo.app_env} />
+              <InfoRow label="Версия" value={sysInfo.version} />
+              <InfoRow label="База данных" value={sysInfo.database_url_safe} />
               <div className="flex items-center justify-between py-3 border-b border-gray-50 last:border-0">
-                <span className="text-sm text-gray-500">Frontend URL</span>
+                <span className="text-sm text-gray-500">URL фронтенда</span>
                 <span className="text-sm font-medium text-blue-600 font-mono">
                   {window.location.origin}
                 </span>
               </div>
             </div>
           ) : (
-            <p className="text-sm text-gray-400">Loading…</p>
+            <p className="text-sm text-gray-400">Загрузка…</p>
           )}
         </CardContent>
       </Card>
@@ -83,19 +112,31 @@ export function SettingsPage() {
           {/* Live status */}
           <div className="flex items-center justify-between">
             <span className="text-sm text-gray-600">Статус pjsip.conf</span>
-            {asteriskLoading ? (
-              <Badge variant="yellow">Checking…</Badge>
-            ) : asteriskOk ? (
-              <div className="flex items-center gap-2">
-                <StatusDot ok={true} />
-                <Badge variant="green">Configured</Badge>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <StatusDot ok={false} />
-                <Badge variant="yellow">Not Configured</Badge>
-              </div>
-            )}
+            <div className="flex items-center gap-3">
+              {asteriskLoading ? (
+                <Badge variant="yellow">Проверка…</Badge>
+              ) : asteriskOk ? (
+                <div className="flex items-center gap-2">
+                  <StatusDot ok={true} />
+                  <Badge variant="green">Настроено</Badge>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <StatusDot ok={false} />
+                  <Badge variant="yellow">Не настроено</Badge>
+                </div>
+              )}
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={reloading}
+                onClick={handleAsteriskReload}
+                title="Перезагрузить модули Asterisk через AMI"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Reload Asterisk
+              </Button>
+            </div>
           </div>
 
           {asterisk && (
@@ -206,7 +247,7 @@ docker compose up -d
         <CardContent>
           <div className="flex items-center justify-between mb-4">
             <span className="text-sm text-gray-600">MediaMTX / RTSP proxy</span>
-            <Badge variant="yellow">Not Configured</Badge>
+            <Badge variant="yellow">Не настроено</Badge>
           </div>
           <p className="text-sm text-gray-400 bg-gray-50 rounded-lg p-4 border border-gray-100">
             RTSP URL для каждого устройства уже хранится в базе. Для просмотра

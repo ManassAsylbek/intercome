@@ -44,16 +44,16 @@
 
 ## Стек технологий
 
-| Компонент    | Технология                                      |
-| ------------ | ----------------------------------------------- |
-| SIP PBX      | Asterisk (`andrius/asterisk:latest`)            |
-| Видео        | go2rtc (`alexxit/go2rtc:latest`) — RTSP→WebRTC  |
-| STUN         | coturn (`coturn/coturn:latest`) — LAN ICE       |
-| Backend      | Python 3.12, FastAPI, SQLAlchemy, SQLite        |
-| Frontend     | React 18, TypeScript, Vite, Tailwind CSS, JsSIP |
-| Реверс прокси| Nginx (HTTPS, WSS proxy)                        |
-| Авторизация  | JWT (python-jose), bcrypt                       |
-| Контейнеры   | Docker, Docker Compose                          |
+| Компонент     | Технология                                      |
+| ------------- | ----------------------------------------------- |
+| SIP PBX       | Asterisk (`andrius/asterisk:latest`)            |
+| Видео         | go2rtc (`alexxit/go2rtc:latest`) — RTSP→WebRTC  |
+| STUN          | coturn (`coturn/coturn:latest`) — LAN ICE       |
+| Backend       | Python 3.12, FastAPI, SQLAlchemy, SQLite        |
+| Frontend      | React 18, TypeScript, Vite, Tailwind CSS, JsSIP |
+| Реверс прокси | Nginx (HTTPS, WSS proxy)                        |
+| Авторизация   | JWT (python-jose), bcrypt                       |
+| Контейнеры    | Docker, Docker Compose                          |
 
 ---
 
@@ -241,12 +241,15 @@ sudo docker exec intercom-asterisk asterisk -rx "module reload res_pjsip.so"
 ### Эхо во время разговора
 
 Эхо возникает когда микрофон улавливает звук из динамика. Решения:
+
 - Используй **наушники** на стороне браузера — убирает эхо полностью
 - На дверной панели в веб-интерфейсе найди **Echo Cancellation (AEC)** и включи
 - Убавь громкость динамика на дверной панели до 60–70%
 
 # Перезагрузить конфиг Asterisk без рестарта
+
 docker exec intercom-asterisk asterisk -rx "core reload"
+
 ```
 
 ---
@@ -262,3 +265,4 @@ docker exec intercom-asterisk asterisk -rx "core reload"
 | `ADMIN_PASSWORD`   | Пароль администратора            | ⚠️ сменить!           |
 | `APP_CORS_ORIGINS` | Разрешённые origins для CORS     | localhost + SERVER_IP |
 | `ASTERISK_MODE`    | `local` или `ssh`                | `local`               |
+```

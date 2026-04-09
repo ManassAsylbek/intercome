@@ -40,20 +40,22 @@ services:
       - SERVER_IP=${SERVER_IP:-127.0.0.1}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
-      - ASTERISK_MODE=${ASTERISK_MODE:-local}
+      - ASTERISK_MODE=${ASTERISK_MODE:-ami}
       - ASTERISK_PJSIP_CONF=${ASTERISK_PJSIP_CONF:-/etc/asterisk/pjsip.conf}
+      - ASTERISK_EXTENSIONS_CONF=${ASTERISK_EXTENSIONS_CONF:-/etc/asterisk/extensions.conf}
       - ASTERISK_RELOAD_CMD=${ASTERISK_RELOAD_CMD:-}
       - ASTERISK_SSH_HOST=${ASTERISK_SSH_HOST:-}
       - ASTERISK_SSH_PORT=${ASTERISK_SSH_PORT:-22}
       - ASTERISK_SSH_USER=${ASTERISK_SSH_USER:-}
       - ASTERISK_SSH_KEY_FILE=${ASTERISK_SSH_KEY_FILE:-}
-      - ASTERISK_AMI_HOST=${ASTERISK_AMI_HOST:-127.0.0.1}
+      - ASTERISK_AMI_HOST=${ASTERISK_AMI_HOST:-172.18.0.1}
       - ASTERISK_AMI_PORT=${ASTERISK_AMI_PORT:-5038}
       - ASTERISK_AMI_USER=${ASTERISK_AMI_USER:-intercom}
       - ASTERISK_AMI_SECRET=${ASTERISK_AMI_SECRET:-intercom-ami-secret}
     volumes:
       - intercom-data:/app/data
       - ./docker/asterisk/pjsip.conf:/etc/asterisk/pjsip.conf # shared with asterisk
+      - ./docker/asterisk/extensions.conf:/etc/asterisk/extensions.conf # shared with asterisk
       - /var/run/docker.sock:/var/run/docker.sock # для asterisk reload
       - ./docker/bin/docker:/usr/local/bin/docker:ro # linux docker CLI
     healthcheck:

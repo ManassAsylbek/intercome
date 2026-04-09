@@ -151,6 +151,56 @@ class RoutingRuleListOut(BaseModel):
     total: int
 
 
+# ─── Apartment ────────────────────────────────────────────────────────────────
+
+
+class ApartmentMonitorIn(BaseModel):
+    sip_account: str = Field(..., min_length=1, max_length=128)
+    label: Optional[str] = Field(None, max_length=128)
+
+
+class ApartmentMonitorOut(BaseModel):
+    id: int
+    sip_account: str
+    label: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ApartmentCreate(BaseModel):
+    number: str = Field(..., min_length=1, max_length=32)
+    call_code: str = Field(..., min_length=1, max_length=64)
+    notes: Optional[str] = None
+    enabled: bool = True
+    monitors: list[ApartmentMonitorIn] = []
+
+
+class ApartmentUpdate(BaseModel):
+    number: Optional[str] = Field(None, min_length=1, max_length=32)
+    call_code: Optional[str] = Field(None, min_length=1, max_length=64)
+    notes: Optional[str] = None
+    enabled: Optional[bool] = None
+    monitors: Optional[list[ApartmentMonitorIn]] = None
+
+
+class ApartmentOut(BaseModel):
+    id: int
+    number: str
+    call_code: str
+    notes: Optional[str] = None
+    enabled: bool
+    monitors: list[ApartmentMonitorOut] = []
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApartmentListOut(BaseModel):
+    items: list[ApartmentOut]
+    total: int
+
+
 # ─── Activity Log ─────────────────────────────────────────────────────────────
 
 

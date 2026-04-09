@@ -189,3 +189,47 @@ class ActivityLog(Base):
     )
 
     device: Mapped["Device | None"] = relationship("Device", back_populates="activity_logs")
+
+
+# ─── Apartment ────────────────────────────────────────────────────────────────
+
+
+class Apartment(Base):
+    """Represents one apartment / unit. Rings all its monitors when door calls."""
+
+    __tablename__ = "apartments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    call_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    monitors: Mapped[list["ApartmentMonitor"]] = relationship(
+        "ApartmentMonitor",
+        back_populates="apartment",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+
+
+class ApartmentMonitor(Base):
+    """A single SIP account (monitor/phone) belonging to an apartment."""
+
+    __tablename__ = "apartment_monitors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    apartment_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("apartments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sip_account: Mapped[str] = mapped_column(String(128), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    apartment: Mapped["Apartment"] = relationship("Apartment", back_populates="monitors")

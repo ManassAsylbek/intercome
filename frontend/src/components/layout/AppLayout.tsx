@@ -9,16 +9,18 @@ import {
   LayoutDashboard,
   Monitor,
   GitFork,
+  Building2,
   Settings,
   LogOut,
   Radio,
 } from "lucide-react";
 
 const navItems = [
-  { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-  { to: "/devices", icon: Monitor, label: "Devices" },
-  { to: "/routing", icon: GitFork, label: "Routing Rules" },
-  { to: "/settings", icon: Settings, label: "Settings" },
+  { to: "/dashboard", icon: LayoutDashboard, label: "Дашборд" },
+  { to: "/devices", icon: Monitor, label: "Устройства" },
+  { to: "/apartments", icon: Building2, label: "Квартиры" },
+  { to: "/routing", icon: GitFork, label: "Маршрутизация" },
+  { to: "/settings", icon: Settings, label: "Настройки" },
 ];
 
 export function AppLayout() {
@@ -97,9 +99,9 @@ export function AppLayout() {
             </div>
             <div>
               <p className="text-white font-semibold text-sm leading-tight">
-                Intercom
+                Домофон
               </p>
-              <p className="text-gray-400 text-xs">Management Server</p>
+              <p className="text-gray-400 text-xs">Сервер управления</p>
             </div>
           </div>
         </div>
@@ -135,7 +137,7 @@ export function AppLayout() {
             <button
               onClick={logout}
               className="text-gray-400 hover:text-white transition-colors p-1.5 rounded-md hover:bg-gray-800"
-              title="Logout"
+              title="Выйти"
             >
               <LogOut className="w-4 h-4" />
             </button>

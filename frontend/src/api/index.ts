@@ -1,6 +1,10 @@
 import { apiClient } from "./client";
 import type {
   ActionResult,
+  Apartment,
+  ApartmentCreate,
+  ApartmentListOut,
+  ApartmentUpdate,
   AsteriskHealth,
   DashboardSummary,
   Device,
@@ -83,6 +87,29 @@ export const routingApi = {
       .then((r) => r.data),
 
   delete: (id: number) => apiClient.delete(`/routing-rules/${id}`),
+};
+
+// ─── Apartments ───────────────────────────────────────────────────────────────
+
+export const apartmentsApi = {
+  list: () =>
+    apiClient.get<ApartmentListOut>("/apartments").then((r) => r.data),
+
+  get: (id: number) =>
+    apiClient.get<Apartment>(`/apartments/${id}`).then((r) => r.data),
+
+  create: (data: ApartmentCreate) =>
+    apiClient.post<Apartment>("/apartments", data).then((r) => r.data),
+
+  update: (id: number, data: ApartmentUpdate) =>
+    apiClient.put<Apartment>(`/apartments/${id}`, data).then((r) => r.data),
+
+  delete: (id: number) => apiClient.delete(`/apartments/${id}`),
+
+  syncDialplan: () =>
+    apiClient
+      .post<ActionResult>("/apartments/sync-dialplan")
+      .then((r) => r.data),
 };
 
 // ─── Dashboard / System ───────────────────────────────────────────────────────

@@ -84,28 +84,32 @@ function RuleFormModal({
     <Modal
       open={open}
       onClose={onClose}
-      title={isEdit ? `Edit Rule: ${rule?.name}` : "Add Routing Rule"}
+      title={
+        isEdit
+          ? `Редактировать правило: ${rule?.name}`
+          : "Добавить правило маршрутизации"
+      }
     >
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
         <Input
-          label="Rule Name"
-          placeholder="Front Door → Living Room"
+          label="Название правила"
+          placeholder="Главная дверь → Гостиная"
           {...register("name")}
           error={errors.name?.message}
         />
         <Input
-          label="Call Code"
+          label="Код вызова"
           placeholder="101"
-          hint="The dial code that triggers this rule"
+          hint="Код набора, который запускает это правило"
           {...register("call_code")}
           error={errors.call_code?.message}
         />
 
         <Select
-          label="Source Device (optional)"
+          label="Устройство-источник (необязательно)"
           {...register("source_device_id")}
         >
-          <option value="">— Any source —</option>
+          <option value="">— Любой —</option>
           {devices.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name} ({DEVICE_TYPE_LABELS[d.device_type]})
@@ -114,10 +118,10 @@ function RuleFormModal({
         </Select>
 
         <Select
-          label="Target Device (optional)"
+          label="Целевое устройство (необязательно)"
           {...register("target_device_id")}
         >
-          <option value="">— No device target —</option>
+          <option value="">— Без целевого устройства —</option>
           {devices.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name} ({DEVICE_TYPE_LABELS[d.device_type]})
@@ -126,14 +130,14 @@ function RuleFormModal({
         </Select>
 
         <Input
-          label="Target SIP Account (optional)"
+          label="Целевой SIP-аккаунт (необязательно)"
           placeholder="sip:home001@192.168.31.132"
-          hint="Used when routing to a SIP URI instead of a device"
+          hint="Используется при маршрутизации на SIP URI"
           {...register("target_sip_account")}
         />
 
         <div className="grid grid-cols-2 gap-4">
-          <Input label="Priority" type="number" {...register("priority")} />
+          <Input label="Приоритет" type="number" {...register("priority")} />
           <div className="flex flex-col gap-1 justify-end">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -141,23 +145,23 @@ function RuleFormModal({
                 {...register("enabled")}
                 className="rounded border-gray-300 text-indigo-600"
               />
-              <span className="text-sm text-gray-700">Rule is active</span>
+              <span className="text-sm text-gray-700">Правило активно</span>
             </label>
           </div>
         </div>
 
         <Textarea
-          label="Notes"
-          placeholder="Optional description…"
+          label="Примечания"
+          placeholder="Необязательное описание…"
           {...register("notes")}
         />
 
         <div className="flex justify-end gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={onClose}>
-            Cancel
+            Отмена
           </Button>
           <Button type="submit" loading={isSubmitting}>
-            {isEdit ? "Save Changes" : "Create Rule"}
+            {isEdit ? "Сохранить" : "Создать правило"}
           </Button>
         </div>
       </form>
@@ -185,9 +189,11 @@ export function RoutingRulesPage() {
     <div className="p-8 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Routing Rules</h1>
+          <h1 className="text-2xl font-bold text-gray-900">
+            Правила маршрутизации
+          </h1>
           <p className="text-gray-500 text-sm mt-1">
-            Map call codes to target devices or SIP accounts
+            Привязка кодов вызова к целевым устройствам или SIP-аккаунтам
           </p>
         </div>
         <Button
@@ -196,7 +202,7 @@ export function RoutingRulesPage() {
             setModalOpen(true);
           }}
         >
-          <Plus className="w-4 h-4" /> Add Rule
+          <Plus className="w-4 h-4" /> Добавить правило
         </Button>
       </div>
 
@@ -206,7 +212,9 @@ export function RoutingRulesPage() {
         ) : !data?.items.length ? (
           <div className="p-12 text-center">
             <GitFork className="w-10 h-10 text-gray-300 mx-auto mb-3" />
-            <p className="text-gray-400 mb-4">No routing rules configured.</p>
+            <p className="text-gray-400 mb-4">
+              Правила маршрутизации не настроены.
+            </p>
             <Button
               size="sm"
               onClick={() => {
@@ -214,7 +222,7 @@ export function RoutingRulesPage() {
                 setModalOpen(true);
               }}
             >
-              <Plus className="w-4 h-4" /> Create first rule
+              <Plus className="w-4 h-4" /> Создать первое правило
             </Button>
           </div>
         ) : (
@@ -222,22 +230,22 @@ export function RoutingRulesPage() {
             <thead className="bg-gray-50 border-b border-gray-100">
               <tr>
                 <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">
-                  Name
+                  Название
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
-                  Call Code
+                  Код вызова
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
-                  Source
+                  Источник
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
-                  Target
+                  Цель
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
-                  Priority
+                  Приоритет
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
-                  Status
+                  Статус
                 </th>
                 <th className="px-4 py-3" />
               </tr>
@@ -260,7 +268,7 @@ export function RoutingRulesPage() {
                   </td>
                   <td className="px-4 py-4 text-gray-600 text-xs">
                     {rule.source_device?.name ?? (
-                      <span className="text-gray-400">Any</span>
+                      <span className="text-gray-400">Любой</span>
                     )}
                   </td>
                   <td className="px-4 py-4 text-gray-600 text-xs">
@@ -273,7 +281,7 @@ export function RoutingRulesPage() {
                   </td>
                   <td className="px-4 py-4">
                     <Badge variant={rule.enabled ? "green" : "gray"}>
-                      {rule.enabled ? "Active" : "Disabled"}
+                      {rule.enabled ? "Активно" : "Отключено"}
                     </Badge>
                   </td>
                   <td className="px-4 py-4">

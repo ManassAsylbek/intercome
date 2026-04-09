@@ -16,7 +16,7 @@ from app.schemas import (
     HealthOut,
     SystemInfoOut,
 )
-from app.services.sip_service import sip_service
+from app.services.sip_service import sip_service, reload_asterisk_ami
 
 router = APIRouter(tags=["dashboard"])
 
@@ -45,6 +45,12 @@ async def system_info(_: User = Depends(get_current_user)):
 async def asterisk_health(_: User = Depends(get_current_user)):
     """Возвращает статус подключения к Asterisk (pjsip.conf доступен?)."""
     return await sip_service.health_check()
+
+
+@router.post("/system/asterisk-reload")
+async def asterisk_reload(_: User = Depends(get_current_user)):
+    """Перезагружает модули Asterisk через AMI: res_pjsip + dialplan."""
+    return reload_asterisk_ami()
 
 
 @router.get("/dashboard/summary", response_model=DashboardSummary)

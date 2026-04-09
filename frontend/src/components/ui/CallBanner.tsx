@@ -13,7 +13,13 @@ interface Props {
   onHangup: () => void;
 }
 
-export function CallBanner({ call, sipState, onDismiss, onAnswer, onHangup }: Props) {
+export function CallBanner({
+  call,
+  sipState,
+  onDismiss,
+  onAnswer,
+  onHangup,
+}: Props) {
   const [unlocking, setUnlocking] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -49,7 +55,7 @@ export function CallBanner({ call, sipState, onDismiss, onAnswer, onHangup }: Pr
         {/* Info */}
         <div className="flex-1 min-w-0">
           <p className="text-sm font-semibold text-gray-900">
-            {isActive ? "Call in progress" : "Door Bell Ringing"}
+            {isActive ? "Звонок активен" : "Звонок с двери"}
           </p>
           {call && (
             <>
@@ -62,7 +68,9 @@ export function CallBanner({ call, sipState, onDismiss, onAnswer, onHangup }: Pr
             </>
           )}
 
-          {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
+          {error && (
+            <p className="text-xs text-red-500 mt-1">Ошибка открытия</p>
+          )}
 
           {/* SIP + Door controls */}
           <div className="mt-2 flex items-center gap-2 flex-wrap">
@@ -72,7 +80,7 @@ export function CallBanner({ call, sipState, onDismiss, onAnswer, onHangup }: Pr
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
               >
                 <Phone className="w-3.5 h-3.5" />
-                {isRinging ? "Answer" : "Talk"}
+                {isRinging ? "Ответить" : "Говорить"}
               </button>
             )}
 
@@ -82,7 +90,7 @@ export function CallBanner({ call, sipState, onDismiss, onAnswer, onHangup }: Pr
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600 text-white hover:bg-red-700 transition-colors"
               >
                 <PhoneOff className="w-3.5 h-3.5" />
-                Hang Up
+                Сбросить
               </button>
             )}
 
@@ -92,16 +100,23 @@ export function CallBanner({ call, sipState, onDismiss, onAnswer, onHangup }: Pr
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-60 transition-colors"
             >
               <DoorOpen className="w-3.5 h-3.5" />
-              {unlocked ? "Opened!" : unlocking ? "Opening…" : "Open Door"}
+              {unlocked
+                ? "Открыто!"
+                : unlocking
+                  ? "Открывается…"
+                  : "Открыть дверь"}
             </button>
           </div>
         </div>
 
         {/* Dismiss */}
         <button
-          onClick={() => { onHangup(); onDismiss(); }}
+          onClick={() => {
+            onHangup();
+            onDismiss();
+          }}
           className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors mt-0.5"
-          title="Dismiss"
+          title="Закрыть"
         >
           <X className="w-4 h-4" />
         </button>

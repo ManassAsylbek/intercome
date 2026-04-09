@@ -15,30 +15,30 @@ export function formatLatency(ms: number | null | undefined) {
 }
 
 export const DEVICE_TYPE_LABELS: Record<string, string> = {
-  door_station: "Door Station",
-  home_station: "Home Station",
-  guard_station: "Guard Station",
-  sip_client: "SIP Client",
-  camera: "Camera",
+  door_station: "Панель домофона",
+  home_station: "Домашний монитор",
+  guard_station: "Пост охраны",
+  sip_client: "SIP-клиент",
+  camera: "Камера",
 };
 
 export const UNLOCK_METHOD_LABELS: Record<string, string> = {
   http_get: "HTTP GET",
   http_post: "HTTP POST",
   sip_dtmf: "SIP DTMF",
-  none: "None",
+  none: "Нет",
 };
 
 export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
-  device_created: "Device Created",
-  device_updated: "Device Updated",
-  device_deleted: "Device Deleted",
-  unlock_test: "Unlock Test",
-  connection_test: "Connection Test",
-  login: "Login",
-  rule_created: "Rule Created",
-  rule_updated: "Rule Updated",
-  rule_deleted: "Rule Deleted",
-  door_call: "🔔 Door Call",
-  door_call_end: "📵 Call Ended",
+  device_created: "Устройство добавлено",
+  device_updated: "Устройство изменено",
+  device_deleted: "Устройство удалено",
+  unlock_test: "Тест открытия",
+  connection_test: "Тест соединения",
+  login: "Вход",
+  rule_created: "Правило добавлено",
+  rule_updated: "Правило изменено",
+  rule_deleted: "Правило удалено",
+  door_call: "🔔 Звонок с двери",
+  door_call_end: "📵 Звонок завершён",
 };

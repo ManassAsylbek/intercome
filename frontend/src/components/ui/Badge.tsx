@@ -33,10 +33,10 @@ export function Badge({ variant = "gray", children, className }: BadgeProps) {
 
 export function OnlineBadge({ isOnline }: { isOnline: boolean | null }) {
   if (isOnline === null || isOnline === undefined)
-    return <Badge variant="gray">Unknown</Badge>;
+    return <Badge variant="gray">Неизвестно</Badge>;
   return isOnline ? (
-    <Badge variant="green">● Online</Badge>
+    <Badge variant="green">● Онлайн</Badge>
   ) : (
-    <Badge variant="red">● Offline</Badge>
+    <Badge variant="red">● Офлайн</Badge>
   );
 }

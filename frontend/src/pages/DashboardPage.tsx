@@ -38,36 +38,36 @@ export function DashboardPage() {
     );
 
   if (isError || !data)
-    return <div className="p-8 text-red-500">Failed to load dashboard.</div>;
+    return <div className="p-8 text-red-500">Ошибка загрузки дашборда.</div>;
 
   return (
     <div className="p-8 space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <p className="text-gray-500 text-sm mt-1">Intercom system overview</p>
+        <h1 className="text-2xl font-bold text-gray-900">Дашборд</h1>
+        <p className="text-gray-500 text-sm mt-1">Обзор системы домофона</p>
       </div>
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
-          label="Total Devices"
+          label="Всего устройств"
           value={data.total_devices}
           icon={<Monitor className="w-5 h-5" />}
         />
         <StatCard
-          label="Online"
+          label="Онлайн"
           value={data.online_devices}
           color="text-green-600"
           icon={<Wifi className="w-5 h-5 text-green-600" />}
         />
         <StatCard
-          label="Offline"
+          label="Оффлайн"
           value={data.offline_devices}
           color="text-red-600"
           icon={<WifiOff className="w-5 h-5 text-red-600" />}
         />
         <StatCard
-          label="Unknown"
+          label="Неизвестно"
           value={data.unknown_devices}
           color="text-yellow-600"
           icon={<HelpCircle className="w-5 h-5 text-yellow-600" />}
@@ -76,25 +76,25 @@ export function DashboardPage() {
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
-          label="Door Stations"
+          label="Панели домофона"
           value={data.door_stations}
           icon={<DoorOpen className="w-5 h-5" />}
         />
         <StatCard
-          label="Home Stations"
+          label="Домашние мониторы"
           value={data.home_stations}
           icon={<Home className="w-5 h-5" />}
         />
         <StatCard
-          label="Routing Rules"
+          label="Правила маршрутизации"
           value={data.total_routing_rules}
-          sub={`${data.active_routing_rules} active`}
+          sub={`${data.active_routing_rules} активных`}
           icon={<GitFork className="w-5 h-5" />}
         />
         <StatCard
-          label="Other Devices"
+          label="Прочие устройства"
           value={data.guard_stations + data.sip_clients + data.cameras}
-          sub="Guard / SIP / Camera"
+          sub="Охрана / SIP / Камера"
           icon={<Monitor className="w-5 h-5" />}
         />
       </div>
@@ -103,12 +103,12 @@ export function DashboardPage() {
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
         <div className="px-6 py-4 border-b border-gray-100">
           <h2 className="text-base font-semibold text-gray-900">
-            Recent Activity
+            Последняя активность
           </h2>
         </div>
         <div className="divide-y divide-gray-50">
           {data.recent_activity.length === 0 && (
-            <p className="px-6 py-6 text-sm text-gray-400">No activity yet.</p>
+            <p className="px-6 py-6 text-sm text-gray-400">Нет событий.</p>
           )}
           {data.recent_activity.map((log) => (
             <div

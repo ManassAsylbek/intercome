@@ -10,12 +10,12 @@ import type { Device, DeviceType } from "@/types";
 import { Plus, Pencil, Trash2, Eye, Filter } from "lucide-react";
 
 const DEVICE_TYPES: { value: string; label: string }[] = [
-  { value: "", label: "All Types" },
-  { value: "door_station", label: "Door Station" },
-  { value: "home_station", label: "Home Station" },
-  { value: "guard_station", label: "Guard Station" },
-  { value: "sip_client", label: "SIP Client" },
-  { value: "camera", label: "Camera" },
+  { value: "", label: "Все типы" },
+  { value: "door_station", label: "Панель домофона" },
+  { value: "home_station", label: "Домашний монитор" },
+  { value: "guard_station", label: "Пост охраны" },
+  { value: "sip_client", label: "SIP-клиент" },
+  { value: "camera", label: "Камера" },
 ];
 
 const TYPE_BADGE: Record<
@@ -64,14 +64,19 @@ export function DevicesPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Devices</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Устройства</h1>
           <p className="text-gray-500 text-sm mt-1">
-            {data?.total ?? 0} device{data?.total !== 1 ? "s" : ""} configured
+            {data?.total ?? 0} устройств
+            {(() => {
+              const n = data?.total ?? 0;
+              return n === 1 ? "о" : n >= 2 && n <= 4 ? "а" : "";
+            })()}{" "}
+            настроено
           </p>
         </div>
         <Button onClick={openCreate}>
           <Plus className="w-4 h-4" />
-          Add Device
+          Добавить устройство
         </Button>
       </div>
 
@@ -96,13 +101,13 @@ export function DevicesPage() {
       {/* Table */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         {isLoading ? (
-          <div className="p-8 text-center text-gray-400">Loading…</div>
+          <div className="p-8 text-center text-gray-400">Загрузка…</div>
         ) : !data?.items.length ? (
           <div className="p-12 text-center">
-            <p className="text-gray-400 mb-4">No devices found.</p>
+            <p className="text-gray-400 mb-4">Устройства не найдены.</p>
             <Button onClick={openCreate} size="sm">
               <Plus className="w-4 h-4" />
-              Add your first device
+              Добавить первое устройство
             </Button>
           </div>
         ) : (
@@ -110,19 +115,19 @@ export function DevicesPage() {
             <thead className="bg-gray-50 border-b border-gray-100">
               <tr>
                 <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">
-                  Name
+                  Название
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">
-                  Type
+                  Тип
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">
-                  IP Address
+                  IP-адрес
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">
-                  Status
+                  Статус
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">
-                  Features
+                  Функции
                 </th>
                 <th className="px-4 py-3" />
               </tr>

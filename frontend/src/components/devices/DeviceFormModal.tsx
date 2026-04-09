@@ -4,7 +4,13 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
-import { Input, Select, Textarea, Checkbox } from "@/components/ui/FormFields";
+import {
+  Input,
+  Select,
+  Textarea,
+  Checkbox,
+  PasswordInput,
+} from "@/components/ui/FormFields";
 import { useCreateDevice, useUpdateDevice } from "@/hooks/useDevices";
 import { toast } from "@/components/ui/Toast";
 import { devicesApi } from "@/api";
@@ -155,37 +161,37 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
     <Modal
       open={open}
       onClose={onClose}
-      title={isEdit ? `Edit: ${device?.name}` : "Add New Device"}
+      title={isEdit ? `Редактировать: ${device?.name}` : "Добавить устройство"}
       size="xl"
     >
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
         {/* Basic Info */}
         <section>
           <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">
-            Basic Information
+            Основная информация
           </h3>
           <div className="grid grid-cols-2 gap-4">
             <div className="col-span-2">
               <Input
-                label="Device Name"
+                label="Название устройства"
                 {...register("name")}
                 error={errors.name?.message}
               />
             </div>
             <Select
-              label="Device Type"
+              label="Тип устройства"
               {...register("device_type")}
               error={errors.device_type?.message}
             >
-              <option value="door_station">Door Station</option>
-              <option value="home_station">Home Station</option>
-              <option value="guard_station">Guard Station</option>
-              <option value="sip_client">SIP Client</option>
-              <option value="camera">Camera</option>
+              <option value="door_station">Панель домофона</option>
+              <option value="home_station">Домашний монитор</option>
+              <option value="guard_station">Пост охраны</option>
+              <option value="sip_client">SIP-клиент</option>
+              <option value="camera">Камера</option>
             </Select>
             <div className="flex flex-col gap-1">
               <label className="text-sm font-medium text-gray-700">
-                Enabled
+                Активно
               </label>
               <div className="flex items-center h-9">
                 <Controller
@@ -193,7 +199,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
                   name="enabled"
                   render={({ field }) => (
                     <Checkbox
-                      label="Device is active"
+                      label="Устройство активно"
                       {...field}
                       checked={field.value}
                     />
@@ -202,13 +208,13 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
               </div>
             </div>
             <Input
-              label="IP Address"
+              label="IP-адрес"
               placeholder="192.168.31.31"
               {...register("ip_address")}
               error={errors.ip_address?.message}
             />
             <Input
-              label="Web Port"
+              label="Веб-порт"
               type="number"
               placeholder="8000"
               {...register("web_port")}
@@ -216,8 +222,8 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
             />
             <div className="col-span-2">
               <Textarea
-                label="Notes"
-                placeholder="Optional notes…"
+                label="Примечания"
+                placeholder="Необязательно…"
                 {...register("notes")}
               />
             </div>
@@ -230,44 +236,47 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
         <section>
           <div className="flex items-center gap-3 mb-3">
             <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-              SIP Configuration
+              SIP-конфигурация
             </h3>
             <Controller
               control={control}
               name="sip_enabled"
               render={({ field }) => (
-                <Checkbox label="Enable SIP" {...field} checked={field.value} />
+                <Checkbox
+                  label="Включить SIP"
+                  {...field}
+                  checked={field.value}
+                />
               )}
             />
           </div>
           {sipEnabled && (
             <div className="grid grid-cols-2 gap-4">
               <Input
-                label="SIP Account"
+                label="SIP-аккаунт"
                 placeholder="1001"
                 {...register("sip_account")}
               />
-              <Input
-                label="SIP Password"
-                type="password"
+              <PasswordInput
+                label="SIP-пароль"
                 placeholder="••••••"
                 {...register("sip_password")}
               />
               <Input
-                label="SIP Server"
+                label="SIP-сервер"
                 placeholder="192.168.50.132"
                 {...register("sip_server")}
               />
               <Input
-                label="SIP Port"
+                label="SIP-порт"
                 type="number"
                 placeholder="5060"
                 {...register("sip_port")}
               />
               <div className="col-span-2">
                 <Input
-                  label="SIP Proxy"
-                  placeholder="Optional proxy"
+                  label="SIP-прокси"
+                  placeholder="Необязательно"
                   {...register("sip_proxy")}
                 />
               </div>
@@ -280,7 +289,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
                       loading={sipApplying}
                       onClick={handleSipApply}
                     >
-                      Apply to Asterisk (pjsip.conf)
+                      Применить в Asterisk (pjsip.conf)
                     </Button>
                     {sipApplyResult && (
                       <span
@@ -312,14 +321,14 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
         <section>
           <div className="flex items-center gap-3 mb-3">
             <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-              RTSP Stream
+              RTSP-поток
             </h3>
             <Controller
               control={control}
               name="rtsp_enabled"
               render={({ field }) => (
                 <Checkbox
-                  label="Enable RTSP"
+                  label="Включить RTSP"
                   {...field}
                   checked={field.value}
                 />
@@ -328,7 +337,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
           </div>
           {rtspEnabled && (
             <Input
-              label="RTSP URL"
+              label="RTSP адрес"
               placeholder="rtsp://admin:password@192.168.31.31:554/h264"
               {...register("rtsp_url")}
             />
@@ -341,14 +350,14 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
         <section>
           <div className="flex items-center gap-3 mb-3">
             <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-              Door Unlock
+              Открытие двери
             </h3>
             <Controller
               control={control}
               name="unlock_enabled"
               render={({ field }) => (
                 <Checkbox
-                  label="Enable Unlock"
+                  label="Включить открытие"
                   {...field}
                   checked={field.value}
                 />
@@ -357,25 +366,24 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
           </div>
           {unlockEnabled && (
             <div className="grid grid-cols-2 gap-4">
-              <Select label="Unlock Method" {...register("unlock_method")}>
+              <Select label="Метод открытия" {...register("unlock_method")}>
                 <option value="http_get">HTTP GET</option>
                 <option value="http_post">HTTP POST</option>
                 <option value="sip_dtmf">SIP DTMF</option>
-                <option value="none">None</option>
+                <option value="none">Нет</option>
               </Select>
               <Input
-                label="Unlock URL"
+                label="URL открытия"
                 placeholder="http://192.168.31.31:8000/unlock"
                 {...register("unlock_url")}
               />
               <Input
-                label="Username"
+                label="Пользователь"
                 placeholder="admin"
                 {...register("unlock_username")}
               />
-              <Input
-                label="Password"
-                type="password"
+              <PasswordInput
+                label="Пароль"
                 placeholder="123456"
                 {...register("unlock_password")}
               />
@@ -386,10 +394,10 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
         {/* Actions */}
         <div className="flex justify-end gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={onClose}>
-            Cancel
+            Отмена
           </Button>
           <Button type="submit" loading={isSubmitting}>
-            {isEdit ? "Save Changes" : "Create Device"}
+            {isEdit ? "Сохранить" : "Создать устройство"}
           </Button>
         </div>
       </form>

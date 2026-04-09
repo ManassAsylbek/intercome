@@ -6,7 +6,7 @@ import { z } from "zod";
 import { authApi } from "@/api";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/FormFields";
+import { Input, PasswordInput } from "@/components/ui/FormFields";
 import { Radio } from "lucide-react";
 
 const schema = z.object({
@@ -45,8 +45,8 @@ export function LoginPage() {
           <div className="w-14 h-14 bg-indigo-500 rounded-2xl flex items-center justify-center mb-4 shadow-lg">
             <Radio className="w-7 h-7 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-white">Intercom Server</h1>
-          <p className="text-gray-400 text-sm mt-1">Sign in to continue</p>
+          <h1 className="text-2xl font-bold text-white">Система домофона</h1>
+          <p className="text-gray-400 text-sm mt-1">Войдите для продолжения</p>
         </div>
 
         {/* Form */}
@@ -55,15 +55,14 @@ export function LoginPage() {
           className="bg-white rounded-2xl shadow-xl p-8 space-y-4"
         >
           <Input
-            label="Username"
+            label="Имя пользователя"
             placeholder="admin"
             autoComplete="username"
             {...register("username")}
             error={errors.username?.message}
           />
-          <Input
-            label="Password"
-            type="password"
+          <PasswordInput
+            label="Пароль"
             placeholder="••••••••"
             autoComplete="current-password"
             {...register("password")}
@@ -72,7 +71,7 @@ export function LoginPage() {
 
           {error && (
             <p className="text-sm text-red-500 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-              {error}
+              Неверное имя пользователя или пароль
             </p>
           )}
 
@@ -81,12 +80,12 @@ export function LoginPage() {
             className="w-full justify-center"
             loading={isSubmitting}
           >
-            Sign in
+            Войти
           </Button>
         </form>
 
         <p className="text-center text-gray-500 text-xs mt-6">
-          Local admin access only
+          Доступ только для локального администратора
         </p>
       </div>
     </div>

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     # Asterisk integration
     asterisk_mode: str = "local"            # "local" | "ssh" | "ami"
     asterisk_pjsip_conf: str = "/etc/asterisk/pjsip.conf"
+    asterisk_extensions_conf: str = "/etc/asterisk/extensions.conf"
     asterisk_reload_cmd: str = "sudo systemctl restart asterisk"
     asterisk_ssh_host: str = ""
     asterisk_ssh_port: int = 22
