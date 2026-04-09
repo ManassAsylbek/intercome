@@ -1,89 +1,96 @@
 # Intercom Management System
 
-Локальная система управления IP-домофоном на базе устройств **Leelen**. Объединяет Asterisk PBX, FastAPI бэкенд и React фронтенд в одном Docker-стеке. Позволяет управлять домофонными устройствами через браузер: смотреть кто звонит, открывать дверь, просматривать видео с камеры.
+Локальная система управления IP-домофоном на базе устройств **Leelen**. Объединяет Asterisk PBX, FastAPI бэкенд, React фронтенд и go2rtc в одном Docker-стеке. Позволяет принимать звонок с двери прямо в браузере: видеть кто звонит, разговаривать через WebRTC, открывать дверь.
 
 ---
 
 ## Что умеет
 
-- 📞 **SIP маршрутизация** — Asterisk соединяет дверную панель и монитор квартиры
-- 🎥 **RTSP видео** — просмотр видеопотока с камеры двери в браузере
-- 🔓 **Открытие двери** — HTTP-команда на разблокировку замка
+- 📞 **SIP в браузере** — принять/сбросить звонок с дверной панели прямо в браузере (JsSIP + WebRTC over WSS)
+- 🎥 **Live видео** — WebRTC видеопоток с камеры двери через go2rtc (без плагинов)
+- 🔔 **Одновременный звонок** — звонок с двери идёт сразу на браузер и монитор, кто первый ответил — тот говорит
+- 🔓 **Открытие двери** — кнопка в браузере отправляет HTTP-команду на разблокировку замка
 - 📋 **Управление устройствами** — добавление, редактирование, проверка доступности
-- 🔐 **Авторизация** — JWT-аутентификация, защищённый веб-интерфейс
-- 📊 **Дашборд** — статус устройств, активность, системная информация
+- 🔐 **HTTPS + JWT** — самоподписанный SSL, JWT-аутентификация
+- 📊 **Дашборд** — статус устройств, активные звонки, системная информация
 
 ---
 
 ## Архитектура
 
 ```
-[Дверная панель Leelen]  ←── SIP ──→  [Asterisk PBX]  ←── SIP ──→  [Монитор Leelen]
-     192.168.50.31                    network_mode:host               192.168.50.100
-     SIP: 1002                         порт 5060/UDP                  SIP: 1001
-     RTSP: :554                              │
-                                             │ HTTP / shared volume
-                                    [Backend FastAPI :8000]
-                                    Auth │ Devices │ Routing
-                                    Unlock │ Polling │ RTSP
-                                             │
-                                    [Frontend React :80]
-                                             │
-                                    [Браузер пользователя]
+[Дверная панель Leelen]  ←── SIP/UDP ──→  [Asterisk PBX]  ←── SIP/UDP ──→  [Монитор Leelen]
+     192.168.50.31                         network_mode:host                  192.168.50.100
+     SIP: 1002                              порт 5060/UDP                     SIP: 1001
+     RTSP: :554                                   │
+                                    ┌─────────────┴──────────────┐
+                                    │       SIP/WS :8088         │
+                                    └─────────────┬──────────────┘
+                                                  │ WSS (через nginx /sip)
+                                         [Браузер — JsSIP 1099]
+                                                  │
+                              ┌───────────────────┼───────────────────┐
+                              │                   │                   │
+                    [Nginx :443 HTTPS]   [Backend FastAPI]    [go2rtc :1984]
+                     SSL termination      :8000 (внутри)      WebRTC видео
+                     /sip → WS proxy      Auth/Devices         RTSP → WebRTC
+                     /go2rtc/ proxy       Unlock/Polling
+                     /api/ proxy          SSE events
 ```
 
-> **Важно:** `network_mode: host` работает только на **Linux/Ubuntu**. На macOS Docker Desktop UDP NAT ломает SIP Contact заголовки.
+> **Важно:** `network_mode: host` (Asterisk и go2rtc) работает только на **Linux**. На macOS Docker Desktop NAT ломает SIP и RTP.
 
 ---
 
 ## Стек технологий
 
-| Компонент   | Технология                               |
-| ----------- | ---------------------------------------- |
-| SIP PBX     | Asterisk 22 (`andrius/asterisk:latest`)  |
-| Backend     | Python 3.12, FastAPI, SQLAlchemy, SQLite |
-| Frontend    | React 18, TypeScript, Vite, Tailwind CSS |
-| Контейнеры  | Docker, Docker Compose                   |
-| Авторизация | JWT (python-jose), bcrypt                |
+| Компонент    | Технология                                      |
+| ------------ | ----------------------------------------------- |
+| SIP PBX      | Asterisk (`andrius/asterisk:latest`)            |
+| Видео        | go2rtc (`alexxit/go2rtc:latest`) — RTSP→WebRTC  |
+| STUN         | coturn (`coturn/coturn:latest`) — LAN ICE       |
+| Backend      | Python 3.12, FastAPI, SQLAlchemy, SQLite        |
+| Frontend     | React 18, TypeScript, Vite, Tailwind CSS, JsSIP |
+| Реверс прокси| Nginx (HTTPS, WSS proxy)                        |
+| Авторизация  | JWT (python-jose), bcrypt                       |
+| Контейнеры   | Docker, Docker Compose                          |
 
 ---
 
 ## Структура проекта
 
 ```
-intercome-v2/
-├── docker-compose.yml          # Оркестрация: asterisk + backend + frontend
+intercome/
+├── docker-compose.yml          # Оркестрация: asterisk + backend + frontend + go2rtc + coturn
 ├── .env.example                # Шаблон настроек окружения
 ├── docker/
-│   └── asterisk/
-│       ├── pjsip.conf          # SIP аккаунты и транспорт
-│       ├── extensions.conf     # Диалплан (маршрутизация звонков)
-│       ├── rtp.conf            # RTP порты (7000–7100)
-│       ├── manager.conf        # AMI интерфейс
-│       └── asterisk.conf       # Базовые настройки Asterisk
+│   ├── asterisk/
+│   │   ├── pjsip.conf          # SIP аккаунты (1001 монитор, 1002 дверь, 1099 браузер)
+│   │   ├── extensions.conf     # Диалплан: одновременный звонок на браузер+монитор
+│   │   ├── rtp.conf            # RTP порты (10000–20000), icesupport=yes
+│   │   ├── http.conf           # WebSocket транспорт :8088 для браузера
+│   │   ├── manager.conf        # AMI интерфейс
+│   │   └── asterisk.conf       # Базовые настройки
+│   ├── go2rtc/
+│   │   └── go2rtc.yaml         # RTSP потоки (stream: door → rtsp://192.168.50.31)
+│   └── nginx/
+│       ├── server.crt          # Самоподписанный SSL сертификат
+│       └── server.key          # Приватный ключ
 ├── backend/
-│   ├── app/
-│   │   ├── api/routes/         # REST эндпоинты
-│   │   │   ├── auth.py         # POST /api/auth/login, GET /api/auth/me
-│   │   │   ├── devices.py      # CRUD + test-connection + test-unlock
-│   │   │   ├── routing_rules.py
-│   │   │   └── dashboard.py    # /api/health, /api/dashboard/summary
-│   │   ├── services/
-│   │   │   ├── sip_service.py          # Управление pjsip.conf
-│   │   │   ├── unlock_service.py       # HTTP GET/POST разблокировка
-│   │   │   ├── rtsp_service.py         # Проверка RTSP потока
-│   │   │   ├── connectivity_service.py # Ping / TCP проверка
-│   │   │   └── polling_service.py      # Фоновый опрос устройств
-│   │   ├── models/             # SQLAlchemy модели (User, Device, RoutingRule)
-│   │   ├── schemas/            # Pydantic схемы запросов/ответов
-│   │   └── core/               # Конфиг, логирование, JWT/bcrypt
-│   └── alembic/                # Миграции БД
+│   └── app/
+│       ├── api/routes/         # auth, devices, routing_rules, dashboard, calls
+│       ├── services/           # sip, unlock, rtsp, connectivity, polling, call_store
+│       ├── models/             # SQLAlchemy: User, Device, RoutingRule
+│       ├── schemas/            # Pydantic схемы
+│       └── core/               # config, logging, security (JWT/bcrypt)
 └── frontend/
+    ├── nginx.conf              # HTTPS, /sip WSS proxy, /go2rtc/ proxy, /api/ proxy
     └── src/
-        ├── pages/              # Dashboard, Devices, Login, RoutingRules, Settings
-        ├── components/         # UI: Badge, Button, Modal, Toast, FormFields
-        ├── hooks/              # useAuth, useDevices, useDashboard, useRoutingRules
-        └── api/                # HTTP клиент (axios)
+        ├── pages/              # Dashboard, Devices, DeviceDetail, Login, Routing, Settings
+        ├── components/
+        │   ├── ui/             # CallBanner, WebRTCPlayer, Badge, Button, Modal, Toast
+        │   └── layout/         # AppLayout (SIP клиент), RequireAuth
+        └── hooks/              # useAuth, useSIPClient, useCallEvents, useDevices, ...
 ```
 
 ---
@@ -97,7 +104,21 @@ git clone git@github.com:ManassAsylbek/intercome.git
 cd intercome
 ```
 
-### 2. Настроить окружение
+### 2. Сгенерировать SSL сертификат
+
+Браузерный SIP (WebRTC) требует HTTPS. Генерируем самоподписанный сертификат:
+
+```bash
+mkdir -p docker/nginx
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+  -keyout docker/nginx/server.key \
+  -out docker/nginx/server.crt \
+  -subj "/CN=192.168.50.132"
+```
+
+Замени `192.168.50.132` на IP своего сервера.
+
+### 3. Настроить окружение
 
 ```bash
 cp .env.example .env
@@ -112,7 +133,7 @@ APP_SECRET_KEY=замените-на-случайную-строку-32-симв
 ADMIN_PASSWORD=ваш-пароль
 ```
 
-### 3. Установить Docker (если не установлен)
+### 4. Установить Docker (если не установлен)
 
 ```bash
 curl -fsSL https://get.docker.com | sh
@@ -120,27 +141,28 @@ sudo usermod -aG docker $USER
 newgrp docker
 ```
 
-### 4. Запустить
+### 5. Запустить
 
 ```bash
 docker compose up -d
 ```
 
-### 5. Проверить
+### 6. Проверить статус
 
 ```bash
-# Статус контейнеров
 docker compose ps
 
-# SIP регистрации устройств (должны показать реальные IP устройств)
-docker exec intercom-asterisk asterisk -rx "pjsip show contacts"
+# SIP регистрации — должны быть 1001 (монитор) и 1002 (дверь) со статусом Avail
+sudo docker exec intercom-asterisk asterisk -rx "pjsip show contacts"
 ```
 
-### 6. Открыть веб-интерфейс
+### 7. Открыть веб-интерфейс
 
 ```
-http://192.168.50.132
+https://192.168.50.132
 ```
+
+Браузер покажет предупреждение о самоподписанном сертификате — нажми «Продолжить».
 
 Логин: `admin` / пароль из `.env`
 
@@ -149,10 +171,12 @@ http://192.168.50.132
 ## Открыть порты (UFW)
 
 ```bash
-sudo ufw allow 80/tcp       # Веб-интерфейс
-sudo ufw allow 8000/tcp     # Backend API
-sudo ufw allow 5060/udp     # SIP
-sudo ufw allow 7000:7100/udp # RTP (аудио/видео)
+sudo ufw allow 80/tcp             # HTTP → редирект на HTTPS
+sudo ufw allow 443/tcp            # HTTPS веб-интерфейс
+sudo ufw allow 5060/udp           # SIP (дверь и монитор)
+sudo ufw allow 8088/tcp           # Asterisk WebSocket (SIP из браузера)
+sudo ufw allow 3478/udp           # STUN (coturn — ICE для WebRTC)
+sudo ufw allow 10000:20000/udp    # RTP аудио/видео
 sudo ufw reload
 ```
 
@@ -164,11 +188,13 @@ sudo ufw reload
 | ---------------- | ---------------- | ----------- | ---------------- |
 | Дверная панель   | `192.168.50.31`  | `1002`      | `StrongPass1002` |
 | Монитор квартиры | `192.168.50.100` | `1001`      | `StrongPass1001` |
+| Браузер          | —                | `1099`      | `BrowserSip1099` |
 
-На каждом устройстве в SIP-настройках указать:
+На устройствах Leelen в SIP-настройках указать:
 
 - **SIP Server**: `192.168.50.132`
 - **Port**: `5060`
+- **Transport**: UDP
 
 ---
 
@@ -176,9 +202,10 @@ sudo ufw reload
 
 1. Человек нажимает кнопку на **дверной панели** (SIP `1002`)
 2. Панель делает SIP INVITE → **Asterisk** (`192.168.50.132:5060`)
-3. Asterisk видит caller ID `1002` → звонит на **монитор** (`1001`)
-4. Монитор принимает → двусторонняя аудио/видео связь
-5. Пользователь нажимает `*` → DTMF проходит через bridge → дверь открывается
+3. Asterisk видит caller ID `1002` → одновременно звонит на **монитор** (`1001`) и **браузер** (`1099`)
+4. Кто первый ответил — говорит, остальным Asterisk шлёт CANCEL
+5. В браузере появляется баннер с **live видео** с камеры двери (WebRTC через go2rtc)
+6. Пользователь нажимает **Open Door** → HTTP-команда на разблокировку замка
 
 ---
 
@@ -188,15 +215,35 @@ sudo ufw reload
 # Логи всех контейнеров
 docker compose logs -f
 
-# Только Asterisk
-docker logs intercom-asterisk
+# Только Asterisk (SIP события)
+sudo docker logs intercom-asterisk -f
 
-# SIP логи в реальном времени
-docker exec intercom-asterisk asterisk -rx "pjsip set logger on"
-docker logs -f intercom-asterisk
+# Включить verbose SIP лог
+sudo docker exec intercom-asterisk asterisk -rx "pjsip set logger on"
 
 # Статус SIP регистраций
-docker exec intercom-asterisk asterisk -rx "pjsip show endpoints"
+sudo docker exec intercom-asterisk asterisk -rx "pjsip show contacts"
+sudo docker exec intercom-asterisk asterisk -rx "pjsip show endpoints"
+
+# Перезагрузить dialplan без перезапуска
+sudo docker exec intercom-asterisk asterisk -rx "dialplan reload"
+sudo docker exec intercom-asterisk asterisk -rx "module reload res_pjsip.so"
+```
+
+### Браузер не слышит звук / звонок сразу сбрасывается
+
+Самая частая причина — браузерный HTTPS генерирует mDNS ICE-кандидаты (`*.local`), которые Asterisk не может разрешить. Убедись что:
+
+1. Контейнер `coturn` запущен (`docker compose ps coturn` — статус Up)
+2. Порт `3478/udp` открыт в UFW
+3. Браузер открыт именно по **HTTPS** (не HTTP)
+
+### Эхо во время разговора
+
+Эхо возникает когда микрофон улавливает звук из динамика. Решения:
+- Используй **наушники** на стороне браузера — убирает эхо полностью
+- На дверной панели в веб-интерфейсе найди **Echo Cancellation (AEC)** и включи
+- Убавь громкость динамика на дверной панели до 60–70%
 
 # Перезагрузить конфиг Asterisk без рестарта
 docker exec intercom-asterisk asterisk -rx "core reload"
