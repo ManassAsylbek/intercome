@@ -356,21 +356,6 @@ class SIPService:
             "message": "Asterisk AMI polling not yet implemented",
         }
 
-    async def originate_call(self, from_account: str, to_account: str) -> ActionResult:
-        logger.info("sip_originate_stub", from_account=from_account, to_account=to_account)
-        return ActionResult(
-            success=False,
-            message="SIP call origination not yet implemented",
-            detail="Configure Asterisk AMI connection first",
-        )
-
-    async def send_dtmf_unlock(self, device, dtmf_code: str = "#") -> ActionResult:
-        return ActionResult(
-            success=False,
-            message="SIP DTMF unlock not yet implemented",
-            detail="Requires active Asterisk AMI session",
-        )
-
     async def health_check(self) -> dict:
         mode = settings.asterisk_mode
         conf = settings.asterisk_pjsip_conf

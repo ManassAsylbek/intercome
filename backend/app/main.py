@@ -46,57 +46,6 @@ async def _seed_admin() -> None:
             logger.info("admin_user_exists", username=settings.admin_username)
 
 
-async def _seed_sample_devices() -> None:
-    """Seed sample door station and home station on first run."""
-    from sqlalchemy import select
-
-    from app.db.session import AsyncSessionLocal
-    from app.models import Device, DeviceType, UnlockMethod
-
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Device))
-        if result.scalars().first() is not None:
-            return  # Already seeded
-
-        door_station = Device(
-            name="Front Door Station",
-            device_type=DeviceType.DOOR_STATION,
-            ip_address="192.168.31.31",
-            web_port=8000,
-            enabled=True,
-            notes="Leelen-compatible door station at front entrance",
-            sip_enabled=True,
-            sip_account="door001",
-            sip_password="sip123456",
-            sip_server="192.168.31.132",
-            sip_port=5060,
-            rtsp_enabled=True,
-            rtsp_url="rtsp://admin:123456@192.168.31.31:554/h264",
-            unlock_enabled=True,
-            unlock_method=UnlockMethod.HTTP_GET,
-            unlock_url="http://192.168.31.31:8000/unlock",
-            unlock_username="admin",
-            unlock_password="123456",
-        )
-        home_station = Device(
-            name="Living Room Home Station",
-            device_type=DeviceType.HOME_STATION,
-            ip_address="192.168.31.100",
-            web_port=80,
-            enabled=True,
-            notes="Leelen-compatible home station in living room",
-            sip_enabled=True,
-            sip_account="home001",
-            sip_password="sip123456",
-            sip_server="192.168.31.132",
-            sip_port=5060,
-        )
-        db.add(door_station)
-        db.add(home_station)
-        await db.commit()
-        logger.info("sample_devices_seeded")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("startup", env=settings.app_env)
