@@ -1,6 +1,304 @@
 # Intercom Management System
 
-Локальная система управления IP-домофоном на базе устройств **Leelen**. Объединяет Asterisk PBX, FastAPI бэкенд, React фронтенд и go2rtc в одном Docker-стеке. Позволяет принимать звонок с двери прямо в браузере: видеть кто звонит, разговаривать через WebRTC, открывать дверь.
+Система управления IP-домофоном. Объединяет Asterisk PBX, FastAPI бэкенд, React фронтенд и go2rtc в одном Docker-стеке. Позволяет принимать звонки с дверных панелей, калиток и шлагбаумов прямо в браузере: видеть кто звонит, разговаривать через WebRTC, открывать дверь. Поддерживает многоквартирные дома — несколько мониторов в квартире, несколько источников вызова, облачная переадресация на мобильное приложение.
+
+---
+
+## Что умеет
+
+- 📞 **SIP в браузере** — принять/сбросить звонок прямо в браузере (JsSIP + WebRTC over WSS)
+- 🎥 **Live видео** — WebRTC видеопоток с камеры двери через go2rtc (без плагинов)
+- 🔔 **Одновременный звонок** — звонок идёт сразу на браузер, все мониторы квартиры и в облако
+- 🏢 **Квартиры** — каждая квартира имеет код вызова и список мониторов; диалплан генерируется автоматически
+- 📡 **Облачная переадресация** — при включении звонок через SIP-транк идёт в облако к мобильным пользователям
+- 🚪 **Несколько источников** — любое количество дверей/калиток/шлагбаумов на одну квартиру
+- 🔓 **Открытие двери** — кнопка в браузере отправляет HTTP-команду на разблокировку замка
+- 📋 **Управление устройствами** — добавление/редактирование, SIP в Asterisk через кнопку
+- 🔐 **HTTPS + JWT** — самоподписанный SSL, JWT-аутентификация
+- 📊 **Дашборд** — статус устройств, активные звонки, лог активности
+
+---
+
+## Архитектура
+
+```
+[Дверь / Калитка / Шлагбаум]
+  SIP 1002 / 1004 / 1005                    Набирает call_code квартиры
+        │                                   (напр. 1042)
+        ▼
+[Asterisk PBX]  ─── network_mode: host ───  порт 5060/UDP
+        │
+        │  Dial одновременно:
+        ├─── PJSIP/1099  ────────────────── Браузер (WebRTC/WSS через nginx)
+        ├─── PJSIP/1001  ────────────────── Монитор 1 (Гостиная)
+        ├─── PJSIP/1003  ────────────────── Монитор 2 (Спальня)
+        └─── PJSIP/1042@cloud-trunk ──────── Облако → мобильное приложение (если включено)
+                                             (опционально — CLOUD_SIP_TRUNK_ENDPOINT)
+        │
+[Nginx :443 HTTPS]
+  /sip      → ws://asterisk:8088/ws   (WebSocket для JsSIP)
+  /api/     → http://backend:8000      (REST API)
+  /go2rtc/  → http://go2rtc:1984       (WebRTC видео)
+
+[FastAPI Backend :8000]
+  - CRUD: devices, apartments, routing_rules
+  - SIP apply: пишет pjsip.conf + extensions.conf, docker exec перезагружает Asterisk
+  - Webhooks: call_start / call_end от Asterisk
+  - SSE: события звонков → браузер
+
+[go2rtc :1984]       — RTSP → WebRTC конвертер
+[coturn  :3478]      — STUN-сервер для WebRTC ICE
+```
+
+> **Важно:** `network_mode: host` (Asterisk) работает только на **Linux**. На macOS SIP/RTP не работает через Docker NAT.
+
+---
+
+## Стек технологий
+
+| Компонент     | Технология                                        |
+|---------------|---------------------------------------------------|
+| SIP PBX       | Asterisk (`andrius/asterisk:latest`)              |
+| Видео         | go2rtc (`alexxit/go2rtc:latest`) — RTSP→WebRTC    |
+| STUN          | coturn (`coturn/coturn:latest`) — ICE для WebRTC  |
+| Backend       | Python 3.11, FastAPI, SQLAlchemy async, SQLite    |
+| Frontend      | React 18, TypeScript, Vite, Tailwind CSS, JsSIP   |
+| Реверс прокси | Nginx (HTTPS, WSS proxy, SPA)                     |
+| Авторизация   | JWT (python-jose), bcrypt                         |
+| Контейнеры    | Docker, Docker Compose                            |
+
+---
+
+## Структура проекта
+
+```
+intercome/
+├── docker-compose.yml
+├── .env                            # Настройки (из .env.example)
+├── docker/
+│   ├── asterisk/
+│   │   ├── pjsip.conf              # SIP аккаунты (управляемые блоки + ручные)
+│   │   ├── extensions.conf         # Диалплан (генерируется автоматически из квартир)
+│   │   ├── rtp.conf                # RTP порты 10000–20000
+│   │   ├── http.conf               # WebSocket :8088 для браузера
+│   │   ├── manager.conf            # AMI
+│   │   └── asterisk.conf
+│   ├── go2rtc/
+│   │   └── go2rtc.yaml             # RTSP потоки
+│   ├── nginx/
+│   │   ├── server.crt              # SSL сертификат
+│   │   └── server.key
+│   └── bin/
+│       └── docker                  # docker CLI (x86_64) для reload из backend
+├── backend/
+│   └── app/
+│       ├── api/routes/             # auth, devices, apartments, routing_rules, dashboard
+│       ├── services/
+│       │   ├── sip_service.py      # pjsip.conf + extensions.conf + dialplan reload
+│       │   ├── unlock_service.py
+│       │   ├── connectivity_service.py
+│       │   └── polling_service.py
+│       ├── models/                 # User, Device, Apartment, ApartmentMonitor, RoutingRule
+│       ├── schemas/                # Pydantic схемы
+│       └── core/                   # config, logging, security
+└── frontend/
+    └── src/
+        ├── pages/
+        │   ├── ApartmentsPage.tsx  # Квартиры + мониторы + cloud relay
+        │   ├── DevicesPage.tsx
+        │   ├── RoutingRulesPage.tsx
+        │   ├── DashboardPage.tsx
+        │   └── SettingsPage.tsx
+        ├── components/
+        │   ├── ui/                 # CallBanner, WebRTCPlayer, Button, Modal, Toast…
+        │   └── layout/             # AppLayout (SIP клиент), RequireAuth
+        └── hooks/                  # useAuth, useSIPClient, useCallEvents, useApartments…
+```
+
+---
+
+## Быстрый старт (Ubuntu/Linux)
+
+### 1. Клонировать репозиторий
+
+```bash
+git clone git@github.com:ManassAsylbek/intercome.git
+cd intercome
+```
+
+### 2. Сгенерировать SSL сертификат
+
+```bash
+mkdir -p docker/nginx
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+  -keyout docker/nginx/server.key \
+  -out docker/nginx/server.crt \
+  -subj "/CN=192.168.50.132"
+```
+
+Замени `192.168.50.132` на IP своего сервера.
+
+### 3. Настроить окружение
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Обязательные параметры:
+
+```dotenv
+SERVER_IP=192.168.50.132          # IP Ubuntu-сервера
+APP_SECRET_KEY=замените-на-случайную-строку-32-символа
+ADMIN_PASSWORD=ваш-пароль
+ASTERISK_MODE=local               # local | ami | ssh
+```
+
+### 4. Запустить
+
+```bash
+sudo docker compose up -d --build
+```
+
+### 5. Проверить статус
+
+```bash
+sudo docker compose ps
+
+# SIP регистрации
+sudo docker exec intercom-asterisk asterisk -rx "pjsip show contacts"
+```
+
+### 6. Открыть веб-интерфейс
+
+```
+https://192.168.50.132
+```
+
+Браузер покажет предупреждение о самоподписанном сертификате — нажми «Продолжить».
+
+Логин: `admin` / пароль из `.env`
+
+---
+
+## Открыть порты (UFW)
+
+```bash
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp            # HTTPS веб-интерфейс
+sudo ufw allow 5060/udp           # SIP (устройства)
+sudo ufw allow 8088/tcp           # Asterisk WebSocket (браузерный SIP)
+sudo ufw allow 3478/udp           # STUN (coturn)
+sudo ufw allow 10000:20000/udp    # RTP аудио/видео
+sudo ufw reload
+```
+
+---
+
+## Добавление квартиры
+
+1. **Квартиры** → Добавить квартиру
+2. Указать **Номер** (отображаемое, напр. `42`) и **Код вызова** (SIP-номер, напр. `1042`)
+3. Добавить **Мониторы** — SIP-аккаунты устройств внутри квартиры (`1001`, `1003`,…)
+4. При необходимости включить **Облачную переадресацию** (требует настроенного SIP-транка в `.env`)
+5. Сохранить → `extensions.conf` и dialplan обновятся автоматически
+
+## Добавление устройства (дверь / калитка / шлагбаум)
+
+1. **Устройства** → Добавить → тип "Панель домофона"
+2. Включить **SIP**, указать аккаунт (напр. `1004`) и пароль
+3. Выбрать **Квартиру** к которой будет привязано устройство
+4. Сохранить → кнопка **Применить в Asterisk** создаёт блок в `pjsip.conf`
+5. На самом устройстве прописать: сервер `192.168.50.132`, порт `5060`, аккаунт/пароль, **номер для набора** = код вызова квартиры
+
+Несколько устройств могут звонить на одну квартиру — Asterisk принимает любой вызов на `call_code`.
+
+---
+
+## Как работает звонок
+
+```
+1. Нажата кнопка на дверной панели (SIP 1004)
+2. Панель делает INVITE → Asterisk (195.168.50.132:5060) с номером 1042
+3. Asterisk dial: PJSIP/1099 & PJSIP/1001 & PJSIP/1003 & PJSIP/1042@cloud-trunk
+4. Кто первый ответил — говорит, остальным Asterisk шлёт CANCEL
+5. В браузере появляется баннер с live видео (WebRTC через go2rtc)
+6. Нажать "Открыть дверь" → HTTP POST на unlock URL устройства
+```
+
+---
+
+## Облачная переадресация
+
+Для переадресации звонков на мобильное приложение через облачный SIP-провайдер:
+
+1. Настроить SIP-транк в `docker/asterisk/pjsip.conf` с именем, напр. `cloud-trunk`
+2. В `.env` добавить:
+   ```dotenv
+   CLOUD_SIP_TRUNK_ENDPOINT=cloud-trunk
+   ```
+3. Для каждой квартиры включить **Облачная переадресация** и указать SIP-аккаунт на транке
+4. `extensions.conf` пересгенерируется автоматически при следующем изменении квартиры (или через кнопку "Синхронизировать dialplan")
+
+---
+
+## Отладка
+
+```bash
+# Логи всех контейнеров
+sudo docker compose logs -f
+
+# Только Asterisk
+sudo docker logs intercom-asterisk -f
+
+# SIP лог
+sudo docker exec intercom-asterisk asterisk -rx "pjsip set logger on"
+
+# Статус SIP
+sudo docker exec intercom-asterisk asterisk -rx "pjsip show contacts"
+sudo docker exec intercom-asterisk asterisk -rx "pjsip show endpoints"
+
+# Перезагрузить dialplan
+sudo docker exec intercom-asterisk asterisk -rx "dialplan reload"
+sudo docker exec intercom-asterisk asterisk -rx "module reload res_pjsip.so"
+
+# Посмотреть текущий диалплан
+sudo docker exec intercom-asterisk asterisk -rx "dialplan show intercom"
+```
+
+### Браузер не слышит звук / звонок сразу сбрасывается
+
+Самая частая причина — mDNS ICE-кандидаты (`*.local`) в HTTPS браузере. Убедись:
+
+1. Контейнер `coturn` запущен (`docker compose ps`)
+2. Порт `3478/udp` открыт в UFW
+3. Браузер открыт по **HTTPS** (не HTTP)
+
+### Эхо во время разговора
+
+- Используй **наушники** на стороне браузера
+- На дверной панели включи **Echo Cancellation (AEC)**
+- Убавь громкость динамика панели до 60–70%
+
+---
+
+## Переменные окружения
+
+| Переменная                    | Описание                                          | По умолчанию     |
+|-------------------------------|---------------------------------------------------|------------------|
+| `SERVER_IP`                   | IP сервера                                        | `192.168.50.132` |
+| `FRONTEND_PORT`               | Порт веб-интерфейса                               | `80`             |
+| `APP_SECRET_KEY`              | Секрет JWT (минимум 32 символа)                   | ⚠️ сменить!      |
+| `ADMIN_USERNAME`              | Логин администратора                              | `admin`          |
+| `ADMIN_PASSWORD`              | Пароль администратора                             | ⚠️ сменить!      |
+| `ASTERISK_MODE`               | `local` / `ami` / `ssh`                           | `local`          |
+| `ASTERISK_RELOAD_CMD`         | Команда перезагрузки Asterisk                     | —                |
+| `ASTERISK_AMI_HOST`           | AMI хост                                          | `asterisk-host`  |
+| `ASTERISK_AMI_PORT`           | AMI порт                                          | `5038`           |
+| `ASTERISK_AMI_USER`           | AMI пользователь                                  | `intercom`       |
+| `ASTERISK_AMI_SECRET`         | AMI пароль                                        | —                |
+| `CLOUD_SIP_TRUNK_ENDPOINT`    | Имя PJSIP endpoint для облачного транка           | —                |
+
 
 ---
 
