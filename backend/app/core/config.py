@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     asterisk_ami_user: str = "intercom"
     asterisk_ami_secret: str = "intercom-ami-secret"
 
+    # Cloud SIP trunk (relay calls to cloud → mobile app)
+    # Set to the PJSIP endpoint name configured in pjsip.conf for the cloud trunk
+    # e.g. "cloud-trunk"  →  Dial(...&PJSIP/{call_code}@cloud-trunk)
+    cloud_sip_trunk_endpoint: str = ""
+
     # Logging
     log_level: str = "INFO"
     log_format: str = "json"

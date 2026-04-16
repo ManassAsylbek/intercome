@@ -14,7 +14,8 @@ import { Modal } from "@/components/ui/Modal";
 import { Input, Textarea } from "@/components/ui/FormFields";
 import { toast } from "@/components/ui/Toast";
 import type { Apartment } from "@/types";
-import { Building2, Plus, Pencil, Trash2, Phone, X } from "lucide-react";
+import { Building2, Plus, Pencil, Trash2, Phone, X, Cloud, DoorOpen } from "lucide-react";
+import { DEVICE_TYPE_LABELS } from "@/lib/utils";
 
 const monitorSchema = z.object({
   sip_account: z.string().min(1, "Required"),
@@ -26,6 +27,8 @@ const schema = z.object({
   call_code: z.string().min(1, "Call code is required"),
   notes: z.string().nullable().optional(),
   enabled: z.boolean(),
+  cloud_relay_enabled: z.boolean(),
+  cloud_sip_account: z.string().nullable().optional(),
   monitors: z.array(monitorSchema),
 });
 
@@ -59,12 +62,14 @@ function ApartmentFormModal({
           call_code: apartment.call_code,
           notes: apartment.notes ?? "",
           enabled: apartment.enabled,
+          cloud_relay_enabled: apartment.cloud_relay_enabled,
+          cloud_sip_account: apartment.cloud_sip_account ?? "",
           monitors: apartment.monitors.map((m) => ({
             sip_account: m.sip_account,
             label: m.label ?? "",
           })),
         }
-      : { enabled: true, monitors: [] },
+      : { enabled: true, cloud_relay_enabled: false, monitors: [] },
   });
 
   const { fields, append, remove } = useFieldArray({
@@ -179,6 +184,30 @@ function ApartmentFormModal({
           </label>
         </div>
 
+        {/* Cloud relay */}
+        <div className="rounded-lg border border-blue-100 bg-blue-50 p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <Cloud className="w-4 h-4 text-blue-500" />
+            <span className="text-sm font-medium text-blue-800">Облачная переадресация</span>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              {...register("cloud_relay_enabled")}
+              className="rounded border-gray-300 text-blue-600"
+            />
+            <span className="text-sm text-gray-700">
+              Пересылать звонок в облако → мобильным пользователям
+            </span>
+          </label>
+          <Input
+            label="SIP-аккаунт на облачном транке"
+            placeholder="42 (по умолчанию = код вызова)"
+            hint="Оставьте пустым — будет использован код вызова квартиры"
+            {...register("cloud_sip_account")}
+          />
+        </div>
+
         <Textarea
           label="Примечания"
           placeholder="Необязательное описание…"
@@ -262,7 +291,13 @@ export function ApartmentsPage() {
                   Код вызова
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
+                  Источники
+                </th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
                   Мониторы
+                </th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
+                  Облако
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
                   Статус
@@ -295,6 +330,24 @@ export function ApartmentsPage() {
                     </span>
                   </td>
                   <td className="px-4 py-4">
+                    {apt.source_devices.length === 0 ? (
+                      <span className="text-xs text-gray-400">—</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1">
+                        {apt.source_devices.map((d) => (
+                          <span
+                            key={d.id}
+                            title={DEVICE_TYPE_LABELS[d.device_type]}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 bg-orange-50 text-orange-700 rounded text-xs"
+                          >
+                            <DoorOpen className="w-3 h-3" />
+                            {d.name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-4">
                     {apt.monitors.length === 0 ? (
                       <span className="text-xs text-gray-400">
                         Только браузер
@@ -316,6 +369,15 @@ export function ApartmentsPage() {
                           </span>
                         ))}
                       </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-4">
+                    {apt.cloud_relay_enabled ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs">
+                        <Cloud className="w-3 h-3" /> {apt.cloud_sip_account || apt.call_code}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-400">Отключено</span>
                     )}
                   </td>
                   <td className="px-4 py-4">

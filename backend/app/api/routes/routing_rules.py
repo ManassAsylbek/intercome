@@ -51,9 +51,15 @@ async def _rebuild_dialplan(db: AsyncSession) -> None:
         if rule.target_sip_account not in rules_by_code[rule.call_code]:
             rules_by_code[rule.call_code].append(rule.target_sip_account)
 
+    # Convert to apartment-style dicts for generate_extensions_conf
+    apt_dicts = [
+        {"call_code": code, "monitors": accounts, "cloud_relay_enabled": False, "cloud_sip_account": None}
+        for code, accounts in rules_by_code.items()
+    ]
+
     # Run blocking file I/O in thread pool so async loop is not blocked
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, sip_service.generate_extensions_conf, rules_by_code)
+    await loop.run_in_executor(None, sip_service.generate_extensions_conf, apt_dicts)
 
 
 @router.get("", response_model=RoutingRuleListOut)

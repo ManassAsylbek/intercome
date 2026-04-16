@@ -12,6 +12,7 @@ import {
   PasswordInput,
 } from "@/components/ui/FormFields";
 import { useCreateDevice, useUpdateDevice } from "@/hooks/useDevices";
+import { useApartments } from "@/hooks/useApartments";
 import { toast } from "@/components/ui/Toast";
 import { devicesApi } from "@/api";
 import type { Device } from "@/types";
@@ -47,6 +48,7 @@ const schema = z.object({
   unlock_url: z.string().nullable().optional(),
   unlock_username: z.string().nullable().optional(),
   unlock_password: z.string().nullable().optional(),
+  apartment_id: z.coerce.number().nullable().optional(),
 });
 
 type FormData = z.infer<typeof schema>;
@@ -61,6 +63,8 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
   const isEdit = !!device;
   const create = useCreateDevice();
   const update = useUpdateDevice(device?.id ?? 0);
+  const { data: apartmentsData } = useApartments();
+  const apartments = apartmentsData?.items ?? [];
   const [sipApplying, setSipApplying] = useState(false);
   const [sipApplyResult, setSipApplyResult] = useState<{
     success: boolean;
@@ -112,15 +116,45 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
 
   const onSubmit = async (data: FormData) => {
     try {
+      let savedId: number | undefined;
       if (isEdit && device) {
         await update.mutateAsync(data);
+        savedId = device.id;
         toast("Device updated", "success");
       } else {
-        await create.mutateAsync(
+        const created = await create.mutateAsync(
           data as Parameters<typeof create.mutateAsync>[0],
         );
+        savedId = created.id;
         toast("Device created", "success");
       }
+
+      // Auto-apply SIP to Asterisk if SIP is enabled and credentials are filled
+      if (
+        data.sip_enabled &&
+        data.sip_account &&
+        data.sip_password &&
+        savedId
+      ) {
+        setSipApplying(true);
+        try {
+          const result = await devicesApi.sipApply(savedId, {
+            sip_account: data.sip_account,
+            sip_password: data.sip_password,
+            update_device: false,
+          });
+          if (result.success) {
+            toast("SIP применён в Asterisk ✓", "success");
+          } else {
+            toast(`SIP: ${result.message}`, "error");
+          }
+        } catch {
+          toast("Не удалось применить SIP в Asterisk", "error");
+        } finally {
+          setSipApplying(false);
+        }
+      }
+
       onClose();
     } catch {
       toast("Failed to save device", "error");
@@ -220,6 +254,20 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
               {...register("web_port")}
               error={errors.web_port?.message}
             />
+            <div className="col-span-2">
+              <Select
+                label="Квартира (источник вызова)"
+                hint="Для дверей/калиток/шлагбаумов — к какой квартире привязано устройство"
+                {...register("apartment_id")}
+              >
+                <option value="">— Не привязано —</option>
+                {apartments.map((apt) => (
+                  <option key={apt.id} value={apt.id}>
+                    кв. {apt.number} (код {apt.call_code})
+                  </option>
+                ))}
+              </Select>
+            </div>
             <div className="col-span-2">
               <Textarea
                 label="Примечания"

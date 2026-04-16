@@ -114,6 +114,11 @@ class Device(Base):
     is_online: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Link to apartment this device calls (for source devices: doors, gates, barriers)
+    apartment_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("apartments.id", ondelete="SET NULL"), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
@@ -136,6 +141,9 @@ class Device(Base):
     )
     activity_logs: Mapped[list["ActivityLog"]] = relationship(
         "ActivityLog", back_populates="device", lazy="select"
+    )
+    apartment: Mapped["Apartment | None"] = relationship(
+        "Apartment", foreign_keys=[apartment_id], back_populates="source_devices", lazy="select"
     )
 
 
@@ -205,6 +213,10 @@ class Apartment(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # Cloud relay: forward call to cloud SIP trunk → mobile app users
+    cloud_relay_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    cloud_sip_account: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
@@ -216,6 +228,12 @@ class Apartment(Base):
         "ApartmentMonitor",
         back_populates="apartment",
         cascade="all, delete-orphan",
+        lazy="select",
+    )
+    source_devices: Mapped[list["Device"]] = relationship(
+        "Device",
+        foreign_keys="Device.apartment_id",
+        back_populates="apartment",
         lazy="select",
     )
 

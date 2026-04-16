@@ -65,6 +65,9 @@ class DeviceBase(BaseModel):
     unlock_username: Optional[str] = None
     unlock_password: Optional[str] = None
 
+    # Apartment link (for source devices: door panels, gates, barriers)
+    apartment_id: Optional[int] = None
+
 
 class DeviceCreate(DeviceBase):
     pass
@@ -90,6 +93,7 @@ class DeviceUpdate(BaseModel):
     unlock_url: Optional[str] = None
     unlock_username: Optional[str] = None
     unlock_password: Optional[str] = None
+    apartment_id: Optional[int] = None
 
 
 class DeviceOut(DeviceBase):
@@ -172,6 +176,8 @@ class ApartmentCreate(BaseModel):
     call_code: str = Field(..., min_length=1, max_length=64)
     notes: Optional[str] = None
     enabled: bool = True
+    cloud_relay_enabled: bool = False
+    cloud_sip_account: Optional[str] = Field(None, max_length=128)
     monitors: list[ApartmentMonitorIn] = []
 
 
@@ -180,7 +186,19 @@ class ApartmentUpdate(BaseModel):
     call_code: Optional[str] = Field(None, min_length=1, max_length=64)
     notes: Optional[str] = None
     enabled: Optional[bool] = None
+    cloud_relay_enabled: Optional[bool] = None
+    cloud_sip_account: Optional[str] = Field(None, max_length=128)
     monitors: Optional[list[ApartmentMonitorIn]] = None
+
+
+class ApartmentSourceDeviceOut(BaseModel):
+    id: int
+    name: str
+    device_type: DeviceType
+    sip_account: Optional[str] = None
+    enabled: bool
+
+    model_config = {"from_attributes": True}
 
 
 class ApartmentOut(BaseModel):
@@ -189,7 +207,10 @@ class ApartmentOut(BaseModel):
     call_code: str
     notes: Optional[str] = None
     enabled: bool
+    cloud_relay_enabled: bool = False
+    cloud_sip_account: Optional[str] = None
     monitors: list[ApartmentMonitorOut] = []
+    source_devices: list[ApartmentSourceDeviceOut] = []
     created_at: datetime
     updated_at: datetime
 

@@ -67,6 +67,7 @@ export interface Device {
   unlock_url: string | null;
   unlock_username: string | null;
   unlock_password: string | null;
+  apartment_id: number | null;
   is_online: boolean | null;
   last_seen: string | null;
   created_at: string;
@@ -195,13 +196,24 @@ export interface ApartmentMonitorIn {
   label: string | null;
 }
 
+export interface ApartmentSourceDevice {
+  id: number;
+  name: string;
+  device_type: DeviceType;
+  sip_account: string | null;
+  enabled: boolean;
+}
+
 export interface Apartment {
   id: number;
   number: string;
   call_code: string;
   notes: string | null;
   enabled: boolean;
+  cloud_relay_enabled: boolean;
+  cloud_sip_account: string | null;
   monitors: ApartmentMonitor[];
+  source_devices: ApartmentSourceDevice[];
   created_at: string;
   updated_at: string;
 }
@@ -211,6 +223,8 @@ export interface ApartmentCreate {
   call_code: string;
   notes?: string | null;
   enabled: boolean;
+  cloud_relay_enabled: boolean;
+  cloud_sip_account?: string | null;
   monitors: ApartmentMonitorIn[];
 }
 

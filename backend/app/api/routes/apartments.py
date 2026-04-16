@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models import Apartment, ApartmentMonitor, User
+from app.models import Apartment, ApartmentMonitor, Device, User
 from app.schemas import (
     ActionResult,
     ApartmentCreate,
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/apartments", tags=["apartments"])
 async def _get_apartment(db: AsyncSession, apt_id: int) -> Apartment | None:
     result = await db.execute(
         select(Apartment)
-        .options(selectinload(Apartment.monitors))
+        .options(selectinload(Apartment.monitors), selectinload(Apartment.source_devices))
         .where(Apartment.id == apt_id)
     )
     return result.scalar_one_or_none()
@@ -43,14 +43,19 @@ async def _rebuild_dialplan(db: AsyncSession) -> None:
     )
     apartments = result.scalars().all()
 
-    rules_by_code: dict[str, list[str]] = {}
-    for apt in apartments:
-        if not apt.call_code:
-            continue
-        rules_by_code[apt.call_code] = [m.sip_account for m in apt.monitors]
+    apt_dicts = [
+        {
+            "call_code": apt.call_code,
+            "monitors": [m.sip_account for m in apt.monitors],
+            "cloud_relay_enabled": apt.cloud_relay_enabled,
+            "cloud_sip_account": apt.cloud_sip_account,
+        }
+        for apt in apartments
+        if apt.call_code
+    ]
 
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, sip_service.generate_extensions_conf, rules_by_code)
+    await loop.run_in_executor(None, sip_service.generate_extensions_conf, apt_dicts)
 
 
 @router.get("", response_model=ApartmentListOut)
@@ -61,7 +66,7 @@ async def list_apartments(
     total = (await db.execute(select(func.count(Apartment.id)))).scalar_one()
     result = await db.execute(
         select(Apartment)
-        .options(selectinload(Apartment.monitors))
+        .options(selectinload(Apartment.monitors), selectinload(Apartment.source_devices))
         .order_by(Apartment.number)
     )
     items = result.scalars().all()
@@ -79,6 +84,8 @@ async def create_apartment(
         call_code=payload.call_code,
         notes=payload.notes,
         enabled=payload.enabled,
+        cloud_relay_enabled=payload.cloud_relay_enabled,
+        cloud_sip_account=payload.cloud_sip_account,
     )
     db.add(apt)
     await db.flush()
@@ -123,6 +130,10 @@ async def update_apartment(
         apt.notes = payload.notes
     if payload.enabled is not None:
         apt.enabled = payload.enabled
+    if payload.cloud_relay_enabled is not None:
+        apt.cloud_relay_enabled = payload.cloud_relay_enabled
+    if payload.cloud_sip_account is not None:
+        apt.cloud_sip_account = payload.cloud_sip_account
 
     # Replace monitors if provided
     if payload.monitors is not None:
