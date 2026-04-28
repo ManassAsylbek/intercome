@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     asterisk_mode: str = "local"            # "local" | "ssh" | "ami"
     asterisk_pjsip_conf: str = "/etc/asterisk/pjsip.conf"
     asterisk_extensions_conf: str = "/etc/asterisk/extensions.conf"
+    # Separately managed files — FastAPI writes only these two; never touches the main confs.
+    asterisk_pjsip_webrtc_conf: str = "/etc/asterisk/pjsip_webrtc.conf"
+    asterisk_extensions_apartments_conf: str = "/etc/asterisk/extensions_apartments.conf"
     asterisk_reload_cmd: str = "sudo systemctl restart asterisk"
     asterisk_ssh_host: str = ""
     asterisk_ssh_port: int = 22
@@ -52,6 +55,36 @@ class Settings(BaseSettings):
     # Set to the PJSIP endpoint name configured in pjsip.conf for the cloud trunk
     # e.g. "cloud-trunk"  →  Dial(...&PJSIP/{call_code}@cloud-trunk)
     cloud_sip_trunk_endpoint: str = ""
+
+    # Cloud WebSocket bridge
+    cloud_ws_url: str = ""          # e.g. wss://cloud.example.com/ws/bridge
+    cloud_bridge_token: str = ""    # bearer token issued by cloud to this server
+
+    # WebRTC: STUN URL returned to mobile clients in provision_webrtc_endpoint ack
+    intercom_stun_url: str = ""     # e.g. stun:192.168.50.132:3478
+
+    # Public base URL of this server (used to build go2rtc video links sent to
+    # the cloud in call_started). Defaults to https://{server_ip} if empty.
+    intercom_public_base_url: str = ""  # e.g. https://intercom.example.com
+
+    # Public host/IP of this bridge as reachable by mobile clients.
+    # Used to build SIP WSS URL and TURN URLs in media_config.
+    public_bridge_host: str = ""    # e.g. bridge.example.com or 192.168.31.51
+
+    # WHEP basic-auth (go2rtc) — sent to mobile in media_config.
+    go2rtc_user: str = ""
+    go2rtc_pass: str = ""
+
+    # TURN (coturn) — sent to mobile in media_config.ice_servers.
+    coturn_public_host: str = ""
+    coturn_port: int = 3478
+    coturn_user: str = ""
+    coturn_cred: str = ""
+
+    # SIP-over-WSS endpoint exposed by the bridge (Asterisk via nginx).
+    # Empty → derived from public_bridge_host as wss://{host}/asterisk/ws.
+    sip_ws_url: str = ""
+    sip_domain: str = ""    # SIP realm/domain used by the SIP.js client
 
     # Logging
     log_level: str = "INFO"

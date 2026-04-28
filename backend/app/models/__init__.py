@@ -251,3 +251,23 @@ class ApartmentMonitor(Base):
     label: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     apartment: Mapped["Apartment"] = relationship("Apartment", back_populates="monitors")
+
+
+# ─── WebRTC Endpoints ─────────────────────────────────────────────────────────
+
+
+class WebrtcEndpoint(Base):
+    """WebRTC SIP endpoint provisioned into pjsip_webrtc.conf for mobile clients."""
+
+    __tablename__ = "webrtc_endpoints"
+
+    extension: Mapped[str] = mapped_column(String(16), primary_key=True)
+    # Stored plaintext — Asterisk needs it for REGISTER authentication.
+    # Access restricted by OS permissions on the DB file / directory.
+    password: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )

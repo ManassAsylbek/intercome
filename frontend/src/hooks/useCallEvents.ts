@@ -5,6 +5,7 @@ export interface ActiveCall {
   callee: string;
   started_at: string;
   call_id: string;
+  video_src?: string; // go2rtc stream name, e.g. "panel-1"
 }
 
 export function useCallEvents() {

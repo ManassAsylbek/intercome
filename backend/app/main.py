@@ -51,9 +51,22 @@ async def lifespan(app: FastAPI):
     logger.info("startup", env=settings.app_env)
     await create_tables()
     await _seed_admin()
-    # Sample devices removed — add real devices via UI
 
-    # Start background polling
+    # Self-healing: regenerate pjsip_webrtc.conf from DB on every start
+    from app.services.sip_service import regenerate_webrtc_conf_from_db
+    await regenerate_webrtc_conf_from_db()
+
+    # Start AMI listener (Asterisk Manager Interface)
+    from app.ami.client import ami_client
+    from app.ami.consumer import register_all
+    register_all(ami_client)
+    await ami_client.start()
+
+    # Start cloud WebSocket bridge (outgoing persistent connection)
+    from app.cloud.bridge import cloud_bridge
+    await cloud_bridge.start()
+
+    # Start background device polling
     polling_task = asyncio.create_task(start_polling())
 
     yield
@@ -63,6 +76,9 @@ async def lifespan(app: FastAPI):
         await polling_task
     except asyncio.CancelledError:
         pass
+
+    await cloud_bridge.close()
+    await ami_client.close()
     logger.info("shutdown")
 
 

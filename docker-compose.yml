@@ -52,8 +52,16 @@ services:
       - ASTERISK_AMI_PORT=${ASTERISK_AMI_PORT:-5038}
       - ASTERISK_AMI_USER=${ASTERISK_AMI_USER:-intercom}
       - ASTERISK_AMI_SECRET=${ASTERISK_AMI_SECRET:-intercom-ami-secret}
+      # Cloud WebSocket bridge (optional — leave empty to disable)
+      - CLOUD_WS_URL=${CLOUD_WS_URL:-}
+      - CLOUD_BRIDGE_TOKEN=${CLOUD_BRIDGE_TOKEN:-}
+      - CLOUD_SIP_TRUNK_ENDPOINT=${CLOUD_SIP_TRUNK_ENDPOINT:-}
+      # WebRTC STUN URL returned to mobile clients in provision_webrtc_endpoint ack
+      - INTERCOM_STUN_URL=${INTERCOM_STUN_URL:-stun:${SERVER_IP:-127.0.0.1}:3478}
+      - INTERCOM_PUBLIC_BASE_URL=${INTERCOM_PUBLIC_BASE_URL:-}
     extra_hosts:
       - "asterisk-host:host-gateway"
+      - "host.docker.internal:host-gateway"
     volumes:
       - intercom-data:/app/data
       - ./docker/asterisk/pjsip.conf:/etc/asterisk/pjsip.conf # shared with asterisk
