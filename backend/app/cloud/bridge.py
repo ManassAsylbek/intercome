@@ -22,8 +22,12 @@ After reconnect: full snapshot sent automatically.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import random
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -180,9 +184,10 @@ class CloudBridge:
             recv_task = asyncio.create_task(self._recv_loop(ws))
             send_task = asyncio.create_task(self._send_loop(ws))
             health_task = asyncio.create_task(self._health_loop())
+            media_cfg_task = asyncio.create_task(self._media_config_loop())
 
             done, pending = await asyncio.wait(
-                [recv_task, send_task, health_task],
+                [recv_task, send_task, health_task, media_cfg_task],
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for t in pending:
@@ -212,6 +217,13 @@ class CloudBridge:
         while True:
             await asyncio.sleep(30)
             await self.send_event("system_health", await self._collect_health())
+
+    async def _media_config_loop(self) -> None:
+        """Re-send media_config every 10 min so cloud always has fresh TURN creds."""
+        while True:
+            await asyncio.sleep(600)  # 10 min < 15 min TTL
+            await self.send_event("media_config", _build_media_config())
+            logger.debug("cloud_media_config_refreshed")
 
     # ──────────────────────────────────────────────────────────────────────────
     # Command dispatcher
@@ -286,10 +298,15 @@ class CloudBridge:
         if apartment_code:
             await self._add_monitor_to_apartment(apartment_code, extension)
 
+        public_host = settings.public_bridge_host or settings.server_ip
+        sip_ws_url = settings.sip_ws_url or (
+            f"wss://{public_host}/asterisk/ws" if public_host else f"ws://{settings.server_ip}:8088/ws"
+        )
+        sip_domain = settings.sip_domain or public_host or settings.server_ip
         return {
             "extension": extension,
-            "sip_ws_url": f"ws://{settings.server_ip}:8088/ws",
-            "sip_domain": settings.server_ip,
+            "sip_ws_url": sip_ws_url,
+            "sip_domain": sip_domain,
             "stun": settings.intercom_stun_url,
         }
 
@@ -353,6 +370,21 @@ class CloudBridge:
         return {"apartment_code": apartment_code, "monitors": monitors}
 
     async def _cmd_unlock_door(self, data: dict, **_) -> dict:
+        """Unlock the panel that placed the active call (or one given by id).
+
+        Returns a structured ack so cloud/Flutter can reason about failures:
+            {success: bool, message: str, device_id?: int, device_name?: str,
+             method?: str, latency_ms?: float, unlocked?: bool}
+
+        Resolution order for the target panel:
+          1. If ``device_local_id`` provided → use that device (must be
+             unlock-enabled).
+          2. Else, if there's an active call, find the device whose
+             ``sip_account`` matches the call's caller — this is the panel
+             that's currently ringing, which is what the user actually wants
+             to open.
+          3. Fallback: first unlock-enabled device in DB.
+        """
         from app.db.session import AsyncSessionLocal
         from app.models import Device
         from app.services import unlock_service
@@ -365,35 +397,76 @@ class CloudBridge:
         actor = f"cloud:user:{by_user_id}" if by_user_id else "cloud"
 
         async with AsyncSessionLocal() as db:
+            door: Device | None = None
+
             if device_local_id:
                 result = await db.execute(
-                    select(Device).where(Device.id == device_local_id, Device.unlock_enabled == True)
+                    select(Device).where(
+                        Device.id == device_local_id, Device.unlock_enabled == True  # noqa: E712
+                    )
                 )
                 door = result.scalar_one_or_none()
+                if not door:
+                    return {
+                        "success": False,
+                        "message": f"device_local_id={device_local_id} not found or unlock disabled",
+                        "device_id": device_local_id,
+                    }
             else:
-                # Find first unlock-enabled device
-                result = await db.execute(
-                    select(Device).where(Device.enabled == True, Device.unlock_enabled == True)
-                )
-                door = result.scalars().first()
+                # Try to resolve the panel that's actually calling now.
+                active = call_store.get_active()
+                if active and active.caller and (not call_id or active.call_id == call_id):
+                    result = await db.execute(
+                        select(Device).where(
+                            Device.sip_account == active.caller,
+                            Device.unlock_enabled == True,  # noqa: E712
+                        )
+                    )
+                    door = result.scalars().first()
+
+                if not door:
+                    # Fallback: first unlock-enabled device.
+                    result = await db.execute(
+                        select(Device).where(
+                            Device.enabled == True, Device.unlock_enabled == True  # noqa: E712
+                        )
+                    )
+                    door = result.scalars().first()
 
             if not door:
-                raise RuntimeError("No unlock-enabled device found")
+                return {
+                    "success": False,
+                    "message": "no unlock-enabled device available",
+                    "device_id": None,
+                }
 
             action = await unlock_service.test_unlock(door, db=db, actor=actor)
             await db.commit()
 
+        response: dict = {
+            "success": action.success,
+            "message": action.message
+            or ("OK" if action.success else "unlock failed (no detail from device)"),
+            "device_id": door.id,
+            "device_name": door.name,
+            "method": door.unlock_method.value if door.unlock_method else None,
+            "latency_ms": action.latency_ms,
+        }
+
         if action.success:
             from app.events.bus import event_bus
             active = call_store.get_active()
-            await event_bus.publish("door_opened", {
-                "call_id": call_id or (active.call_id if active else None),
-                "device_id": door.id,
-                "by": "api",
-            })
-            return {"unlocked": True}
+            await event_bus.publish(
+                "door_opened",
+                {
+                    "call_id": call_id or (active.call_id if active else None),
+                    "device_id": door.id,
+                    "by": "api",
+                },
+            )
+            response["unlocked"] = True  # legacy/back-compat
 
-        raise RuntimeError(f"Unlock failed: {action.message}")
+        return response
 
     async def _cmd_reject_call(self, data: dict, **_) -> dict:
         """Hang up the panel's channel — propagates CANCEL to all Dial targets.
@@ -497,12 +570,17 @@ class CloudBridge:
                         "server": d.sip_server or settings.server_ip,
                         "port": d.sip_port or 5060,
                     } if d.sip_enabled else None,
-                    "rtsp": {"enabled": True, "url": d.rtsp_url} if d.rtsp_enabled and d.rtsp_url else None,
+                    "rtsp": _rtsp_block(d.id, d.rtsp_url) if d.rtsp_enabled and d.rtsp_url else None,
                     "unlock": {
-                        "method": d.unlock_method.value if d.unlock_method else "none",
-                        "endpoint": d.unlock_url,
+                        "method": _map_unlock_method(d.unlock_method.value if d.unlock_method else "none"),
+                        "url": d.unlock_url,
                     } if d.unlock_enabled else {"method": "none"},
                     "apartment_code": d.apartment.call_code if d.apartment else None,
+                    "scope": {
+                        "building_id": None,
+                        "entrance_id": None,
+                        "apartment_id": d.apartment_id,
+                    },
                 })
             return out
 
@@ -591,11 +669,41 @@ class CloudBridge:
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _build_turn_credentials(host: str, port: int, ttl: int = 900) -> list[dict]:
+    """Build STUN + TURN ice_servers with short-lived HMAC-SHA1 credentials.
+
+    Uses coturn's `use-auth-secret` mechanism:
+      username   = "{expiry_unix}:intercom"
+      credential = base64( HMAC-SHA1(secret, username) )
+    Matches `static-auth-secret` in turnserver.conf.
+    """
+    expiry = int(time.time()) + ttl
+    username = f"{expiry}:intercom"
+    raw_hmac = hmac.new(
+        settings.coturn_secret.encode(),
+        username.encode(),
+        hashlib.sha1,
+    )
+    credential = base64.b64encode(raw_hmac.digest()).decode()
+    return [
+        {"urls": f"stun:{host}:{port}"},
+        {
+            "urls": [
+                f"turn:{host}:{port}?transport=udp",
+                f"turn:{host}:{port}?transport=tcp",
+            ],
+            "username": username,
+            "credential": credential,
+        },
+    ]
+
+
 def _build_media_config() -> dict:
     """Build the media_config payload advertised to the cloud in the hello frame.
 
     Cloud caches this and serves it to mobile clients via
-    GET /api/mobile/media-config. Refreshed on each WS reconnect.
+    GET /api/mobile/media-config. Refreshed on each WS reconnect and every
+    10 min via _media_config_loop so TURN credentials never expire mid-session.
     """
     cfg: dict[str, Any] = {}
 
@@ -608,21 +716,28 @@ def _build_media_config() -> dict:
             }
         }
 
-    # ICE servers: always advertise a public STUN, plus TURN if configured.
-    ice: list[dict[str, Any]] = [
-        {"urls": "stun:stun.l.google.com:19302"},
-    ]
-    if settings.coturn_public_host and settings.coturn_user and settings.coturn_cred:
+    # ICE servers — prefer short-lived HMAC creds (coturn use-auth-secret);
+    # fall back to static creds; empty list if coturn not configured.
+    ice: list[dict[str, Any]] = []
+    if settings.coturn_public_host:
         host = settings.coturn_public_host
         port = settings.coturn_port
-        ice.append({
-            "urls": [
-                f"turn:{host}:{port}?transport=udp",
-                f"turn:{host}:{port}?transport=tcp",
-            ],
-            "username": settings.coturn_user,
-            "credential": settings.coturn_cred,
-        })
+        if settings.coturn_secret:
+            # Short-lived credentials, TTL 15 min.
+            ice = _build_turn_credentials(host, port, ttl=900)
+        elif settings.coturn_user and settings.coturn_cred:
+            # Static fallback.
+            ice = [
+                {"urls": f"stun:{host}:{port}"},
+                {
+                    "urls": [
+                        f"turn:{host}:{port}?transport=udp",
+                        f"turn:{host}:{port}?transport=tcp",
+                    ],
+                    "username": settings.coturn_user,
+                    "credential": settings.coturn_cred,
+                },
+            ]
     cfg["ice_servers"] = ice
 
     # SIP-over-WSS endpoint for mobile SIP.js clients.
@@ -644,6 +759,16 @@ def _build_media_config() -> dict:
         cfg["sip"] = sip_block
 
     return cfg
+
+
+def _map_unlock_method(method: str) -> str:
+    """Map local unlock_method values to cloud schema values."""
+    return {
+        "http_get": "http",
+        "http_post": "http",
+        "sip_dtmf": "relay",
+        "none": "none",
+    }.get(method, "none")
 
 
 def _map_device_type(dt: str) -> str:
@@ -678,46 +803,104 @@ async def _active_call_to_cloud(active) -> dict:
     }
 
 
+def _ami_field(ev, *names: str) -> str | None:
+    """Case-insensitive header lookup for AMI events.
+
+    panoramisk's ``Message`` lowercases keys (so ``ev["channel"]`` works,
+    ``ev["Channel"]`` does NOT). AMI/SIP-on-the-wire field names are case
+    sensitive in spec but Asterisk and panoramisk play loose, so do the same.
+    """
+    try:
+        keys = list(ev.keys())
+    except Exception:
+        return None
+    targets = {n.lower() for n in names}
+    for k in keys:
+        if k.lower() in targets:
+            try:
+                val = ev[k]
+            except Exception:
+                continue
+            if val is not None and val != "":
+                return val
+    return None
+
+
 async def _find_call_channel(call_id: str) -> str | None:
     """Find the panel/originating channel for *call_id* via AMI.
 
     Matches on Uniqueid first (the originating channel of an inbound call),
-    falls back to Linkedid for bridged scenarios. Field-name casing varies
-    across Asterisk versions, so we try multiple variants.
+    falls back to Linkedid for any channel in the same call group. Field
+    names from panoramisk are lowercased, so we use case-insensitive lookup.
+
+    Logs a diagnostic on miss with a real sample of message dicts so we can
+    see why the channel wasn't found.
     """
     from app.ami.client import ami_client
 
     resp = await ami_client.send_action({"Action": "CoreShowChannels"})
     if not resp:
+        logger.warning("find_call_channel_no_response", call_id=call_id)
         return None
     events = resp if isinstance(resp, list) else [resp]
-    # Prefer exact Uniqueid match (= originating panel channel)
+
+    # Prefer exact Uniqueid match (= originating panel channel).
     for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        uid = ev.get("Uniqueid") or ev.get("UniqueID")
+        uid = _ami_field(ev, "Uniqueid", "UniqueID")
         if uid == call_id:
-            chan = ev.get("Channel")
+            chan = _ami_field(ev, "Channel")
             if chan:
                 return chan
-    # Fallback: Linkedid match (any channel in the same call group)
+
+    # Fallback: Linkedid match (any channel sharing this call's group).
     for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        lid = ev.get("Linkedid") or ev.get("LinkedID")
+        lid = _ami_field(ev, "Linkedid", "LinkedID")
         if lid == call_id:
-            chan = ev.get("Channel")
+            chan = _ami_field(ev, "Channel")
             if chan:
                 return chan
+
+    # Miss: dump real headers so we can debug.
+    sample = []
+    for ev in events[:6]:
+        try:
+            sample.append({k: ev[k] for k in list(ev.keys())[:12]})
+        except Exception:
+            sample.append(repr(ev)[:200])
+    logger.warning(
+        "find_call_channel_miss",
+        call_id=call_id,
+        total_channels=len(events),
+        sample=sample,
+    )
     return None
 
 
+def _rtsp_block(device_id: int, rtsp_url: str) -> dict:
+    """Build the rtsp dict for device_snapshot — includes webrtc/hls URLs."""
+    webrtc_url, hls_url = _build_video_urls(device_id)
+    return {
+        "enabled": True,
+        "url": rtsp_url,
+        "webrtc_url": webrtc_url,
+        "hls_url": hls_url,
+    }
+
+
 def _build_video_urls(device_id: int | None) -> tuple[str | None, str | None]:
-    """Build go2rtc WebRTC + HLS URLs for the given panel device."""
+    """Build go2rtc WHEP + HLS URLs for the given panel device.
+
+    Uses PUBLIC_BRIDGE_HOST so mobile clients reach the bridge from outside the
+    LAN. Falls back to intercom_public_base_url, then server_ip.
+    """
     if not device_id:
         return None, None
-    base = settings.intercom_public_base_url.rstrip("/") if settings.intercom_public_base_url \
-        else f"https://{settings.server_ip}"
+    host = (
+        settings.public_bridge_host
+        or (settings.intercom_public_base_url.replace("https://", "").replace("http://", "").rstrip("/"))
+        or settings.server_ip
+    )
+    base = f"https://{host}" if not host.startswith(("http://", "https://")) else host
     src = f"panel-{device_id}"
     return (
         f"{base}/go2rtc/api/webrtc?src={src}",
@@ -726,21 +909,46 @@ def _build_video_urls(device_id: int | None) -> tuple[str | None, str | None]:
 
 
 async def _resolve_caller_device(sip_account: str) -> tuple[int | None, str | None]:
-    """Find Device whose sip_account matches the caller — return (id, rtsp_url)."""
+    """Find the Device that placed an incoming call — return (id, rtsp_url).
+
+    A SIP account *should* be unique across devices, but historic data can have
+    duplicates (e.g. a Home Monitor row sharing the panel's SIP account).
+    Since calls only originate from panels, prefer in this order:
+
+        1. DOOR_STATION devices with rtsp_enabled (the real calling panel).
+        2. Any DOOR_STATION matching the SIP account.
+        3. Any device with rtsp_enabled.
+        4. Whatever else matches.
+
+    Tiebreaker: smallest device id (deterministic).
+    """
     if not sip_account:
         return None, None
     from sqlalchemy import select
 
     from app.db.session import AsyncSessionLocal
-    from app.models import Device
+    from app.models import Device, DeviceType
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Device).where(Device.sip_account == sip_account, Device.enabled == True)  # noqa: E712
+            select(Device)
+            .where(Device.sip_account == sip_account, Device.enabled == True)  # noqa: E712
+            .order_by(Device.id)
         )
-        dev = result.scalars().first()
-        if not dev:
+        candidates = list(result.scalars().all())
+        if not candidates:
             return None, None
+
+        def _rank(d: Device) -> int:
+            if d.device_type == DeviceType.DOOR_STATION and d.rtsp_enabled:
+                return 0
+            if d.device_type == DeviceType.DOOR_STATION:
+                return 1
+            if d.rtsp_enabled:
+                return 2
+            return 3
+
+        dev = min(candidates, key=_rank)
         return dev.id, (dev.rtsp_url if dev.rtsp_enabled else None)
 
 

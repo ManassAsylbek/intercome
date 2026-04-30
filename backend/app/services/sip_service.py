@@ -612,12 +612,13 @@ _WEBRTC_BLOCK_TMPL = """\
 ; === webrtc: {ext} ===
 [{ext}]
 type=endpoint
-transport=transport-wss
+transport=transport-ws
 aors={ext}
 auth={ext}
 context=from-internal
 disallow=all
 allow=opus,ulaw,alaw
+; webrtc=yes implies: rtcp_mux + use_avpf + ice_support + media_use_received_transport
 webrtc=yes
 use_avpf=yes
 media_encryption=dtls
@@ -626,6 +627,19 @@ dtls_setup=actpass
 ice_support=yes
 media_use_received_transport=yes
 rtcp_mux=yes
+; --- WebRTC over NAT must NOT use these Asterisk defaults: ---
+; direct_media=true would force peer-to-peer RTP between the panel (plain UDP)
+; and the WebRTC client (DTLS-SRTP) — they cannot talk directly. Asterisk has
+; to stay in the media path and bridge SRTP↔RTP.
+direct_media=no
+; rewrite_contact=true makes Asterisk replace the Contact URI (which a SIP.js
+; client sends as sip:foo@*.invalid:0) with the real socket address. Without
+; this re-INVITEs and Hangups can't reach the WS contact.
+rewrite_contact=yes
+; rtp_symmetric=true sends RTP back to the source the packets came from rather
+; than to the SDP-advertised address (which behind NAT is wrong).
+rtp_symmetric=yes
+force_rport=yes
 
 [{ext}]
 type=auth
@@ -657,13 +671,27 @@ def _write_pjsip_webrtc_from_records(records: list[tuple[str, str]]) -> None:
 
 
 def _atomic_write(path: str, content: str) -> None:
-    """Write *content* to *path* atomically (temp-file + os.replace)."""
+    """Write *content* to *path*. Prefers atomic temp+rename; falls back to a
+    direct truncate+write when *path* is a Docker bind-mount of a single file
+    (in which case ``os.replace`` raises EBUSY — the bind-mount pins the inode
+    and rename cannot swap it).
+    """
     dir_name = os.path.dirname(path) or "."
     fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
-        os.replace(tmp_path, path)
+        try:
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            if exc.errno != 16:  # EBUSY only — re-raise everything else
+                raise
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     except Exception:
         try:
             os.unlink(tmp_path)

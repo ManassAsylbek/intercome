@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # Server
     server_host: str = "0.0.0.0"
     server_port: int = 8000
-    server_ip: str = "192.168.50.132"
+    server_ip: str = "192.168.31.132"
 
     # Asterisk integration
     asterisk_mode: str = "local"            # "local" | "ssh" | "ami"
@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # Used to build SIP WSS URL and TURN URLs in media_config.
     public_bridge_host: str = ""    # e.g. bridge.example.com or 192.168.31.51
 
+    # Path where backend writes go2rtc.yaml (shared volume with go2rtc container).
+    # go2rtc watches this file and auto-reloads when it changes.
+    go2rtc_config_path: str = "/go2rtc_config/go2rtc.yaml"
+
+    # Internal go2rtc REST API URL (kept for health checks).
+    go2rtc_api_url: str = ""   # e.g. http://192.168.50.132:1984
+
     # WHEP basic-auth (go2rtc) — sent to mobile in media_config.
     go2rtc_user: str = ""
     go2rtc_pass: str = ""
@@ -78,6 +85,11 @@ class Settings(BaseSettings):
     # TURN (coturn) — sent to mobile in media_config.ice_servers.
     coturn_public_host: str = ""
     coturn_port: int = 3478
+    # Short-lived HMAC-SHA1 credentials (coturn use-auth-secret).
+    # Set COTURN_SECRET to the same value as `static-auth-secret` in turnserver.conf.
+    # When set, COTURN_USER / COTURN_CRED are ignored.
+    coturn_secret: str = ""
+    # Fallback static credentials (used only when coturn_secret is not set).
     coturn_user: str = ""
     coturn_cred: str = ""
 

@@ -58,22 +58,32 @@ class AMIClient:
         for pattern, cb in self._event_handlers:
             manager.register_event(pattern, cb)
 
-        await manager.connect()
-        self._manager = manager
-        self._connected = True
-        logger.info("ami_connected", host=settings.asterisk_ami_host, port=settings.asterisk_ami_port)
+        try:
+            await manager.connect()
+            self._manager = manager
+            self._connected = True
+            logger.info("ami_connected", host=settings.asterisk_ami_host, port=settings.asterisk_ami_port)
 
-        # Keep session alive via periodic Ping; exit on failure → triggers reconnect.
-        while True:
-            await asyncio.sleep(25)
+            # Keep session alive via periodic Ping; exit on failure → triggers reconnect.
+            while True:
+                await asyncio.sleep(25)
+                try:
+                    await asyncio.wait_for(
+                        manager.send_action({"Action": "Ping"}),
+                        timeout=10.0,
+                    )
+                except Exception as exc:
+                    logger.warning("ami_ping_failed", error=str(exc))
+                    break
+        finally:
+            # Always close the manager so its TCP connection doesn't linger and
+            # fire duplicate events when a new session is created on reconnect.
+            self._connected = False
+            self._manager = None
             try:
-                await asyncio.wait_for(
-                    manager.send_action({"Action": "Ping"}),
-                    timeout=10.0,
-                )
-            except Exception as exc:
-                logger.warning("ami_ping_failed", error=str(exc))
-                break
+                manager.close()
+            except Exception:
+                pass
 
     async def close(self) -> None:
         if self._task:

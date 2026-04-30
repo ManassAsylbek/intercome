@@ -5,6 +5,24 @@ version: "3.9"
 #   docker compose up -d
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: intercom-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-intercom}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-intercom}
+      - POSTGRES_DB=${POSTGRES_DB:-intercom}
+    volumes:
+      - intercom-pg:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-intercom} -d ${POSTGRES_DB:-intercom}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   asterisk:
     image: andrius/asterisk:latest
     container_name: intercom-asterisk
@@ -17,6 +35,8 @@ services:
       - ./docker/asterisk/manager.conf:/etc/asterisk/manager.conf
       - ./docker/asterisk/rtp.conf:/etc/asterisk/rtp.conf
       - ./docker/asterisk/http.conf:/etc/asterisk/http.conf
+      - ./docker/asterisk/pjsip_webrtc.conf:/etc/asterisk/pjsip_webrtc.conf
+      - ./docker/asterisk/extensions_apartments.conf:/etc/asterisk/extensions_apartments.conf
     healthcheck:
       test: ["CMD", "asterisk", "-rx", "core show version"]
       interval: 30s
@@ -35,7 +55,7 @@ services:
     environment:
       - APP_ENV=${APP_ENV:-production}
       - APP_SECRET_KEY=${APP_SECRET_KEY:-change-me-32-chars-minimum-here!}
-      - DATABASE_URL=sqlite+aiosqlite:///./data/intercom.db
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://intercom:intercom@postgres:5432/intercom}
       - APP_CORS_ORIGINS=${APP_CORS_ORIGINS:-http://localhost,http://localhost:80}
       - SERVER_IP=${SERVER_IP:-127.0.0.1}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
@@ -59,6 +79,20 @@ services:
       # WebRTC STUN URL returned to mobile clients in provision_webrtc_endpoint ack
       - INTERCOM_STUN_URL=${INTERCOM_STUN_URL:-stun:${SERVER_IP:-127.0.0.1}:3478}
       - INTERCOM_PUBLIC_BASE_URL=${INTERCOM_PUBLIC_BASE_URL:-}
+      - PUBLIC_BRIDGE_HOST=${PUBLIC_BRIDGE_HOST:-}
+      - GO2RTC_USER=${GO2RTC_USER:-}
+      - GO2RTC_PASS=${GO2RTC_PASS:-}
+      - GO2RTC_CONFIG_PATH=/go2rtc_config/go2rtc.yaml
+      - COTURN_PUBLIC_HOST=${COTURN_PUBLIC_HOST:-}
+      - COTURN_PORT=${COTURN_PORT:-3478}
+      - COTURN_USER=${COTURN_USER:-}
+      - COTURN_CRED=${COTURN_CRED:-}
+      - COTURN_SECRET=${COTURN_SECRET:-changeme-turn-secret}
+      - SIP_WS_URL=${SIP_WS_URL:-}
+      - SIP_DOMAIN=${SIP_DOMAIN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
     extra_hosts:
       - "asterisk-host:host-gateway"
       - "host.docker.internal:host-gateway"
@@ -66,8 +100,11 @@ services:
       - intercom-data:/app/data
       - ./docker/asterisk/pjsip.conf:/etc/asterisk/pjsip.conf # shared with asterisk
       - ./docker/asterisk/extensions.conf:/etc/asterisk/extensions.conf # shared with asterisk
+      - ./docker/asterisk/pjsip_webrtc.conf:/etc/asterisk/pjsip_webrtc.conf # backend writes, asterisk reads
+      - ./docker/asterisk/extensions_apartments.conf:/etc/asterisk/extensions_apartments.conf # backend writes, asterisk reads
       - /var/run/docker.sock:/var/run/docker.sock # для asterisk reload
       - ./docker/bin/docker:/usr/local/bin/docker:ro # linux docker CLI
+      - ./docker/go2rtc:/go2rtc_config  # backend writes go2rtc.yaml here
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -87,6 +124,11 @@ services:
     ports:
       - "${FRONTEND_PORT:-80}:80"
       - "443:443"
+    extra_hosts:
+      # nginx проксирует /sip и /asterisk/ws на Asterisk (host network) и
+      # /go2rtc/ на go2rtc (host network). host.docker.internal указывает
+      # на хост, у которого реальный IP не привязан к конкретному значению.
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./docker/nginx/server.crt:/etc/nginx/ssl/server.crt:ro
       - ./docker/nginx/server.key:/etc/nginx/ssl/server.key:ro
@@ -101,11 +143,15 @@ services:
     container_name: intercom-coturn
     restart: unless-stopped
     network_mode: host
+    environment:
+      - COTURN_SECRET=${COTURN_SECRET:-changeme-turn-secret}
     command: >
       -n
       --no-tls
       --no-dtls
-      --no-auth
+      --use-auth-secret
+      --static-auth-secret=${COTURN_SECRET:-changeme-turn-secret}
+      --realm=intercom
       --log-file=stdout
       --listening-port=3478
 
@@ -115,8 +161,10 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
-      - ./docker/go2rtc/go2rtc.yaml:/config/go2rtc.yaml:ro
+      - ./docker/go2rtc/go2rtc.yaml:/config/go2rtc.yaml
 
 volumes:
   intercom-data:
+    driver: local
+  intercom-pg:
     driver: local

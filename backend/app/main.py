@@ -66,6 +66,10 @@ async def lifespan(app: FastAPI):
     from app.cloud.bridge import cloud_bridge
     await cloud_bridge.start()
 
+    # Sync RTSP devices into go2rtc (always-on warm connections to panels)
+    from app.services.go2rtc_service import sync_all_from_db
+    await sync_all_from_db()
+
     # Start background device polling
     polling_task = asyncio.create_task(start_polling())
 

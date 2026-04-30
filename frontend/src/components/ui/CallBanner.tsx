@@ -43,7 +43,7 @@ export function CallBanner({
   return (
     <div className="fixed top-4 right-4 z-50 bg-white border border-gray-200 rounded-xl shadow-xl overflow-hidden w-96">
       {/* Live video */}
-      <WebRTCPlayer src={call?.video_src ?? "panel-1"} />
+      <WebRTCPlayer src={call?.video_src ?? "panel-2"} />
 
       {/* Controls */}
       <div className="flex items-start gap-3 px-4 py-3">

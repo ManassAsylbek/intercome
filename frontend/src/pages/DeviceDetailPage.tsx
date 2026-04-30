@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge, OnlineBadge } from "@/components/ui/Badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { DeviceFormModal } from "@/components/devices/DeviceFormModal";
+import { WebRTCPlayer } from "@/components/ui/WebRTCPlayer";
 import { toast } from "@/components/ui/Toast";
 import {
   DEVICE_TYPE_LABELS,
@@ -26,6 +27,7 @@ import {
   Unlock,
   Check,
   X,
+  Video,
 } from "lucide-react";
 
 function ResultBanner({ result }: { result: ActionResult }) {
@@ -90,6 +92,7 @@ export function DeviceDetailPage() {
   const [connResult, setConnResult] = useState<ActionResult | null>(null);
   const [unlockResult, setUnlockResult] = useState<ActionResult | null>(null);
   const [editOpen, setEditOpen] = useState(false);
+  const [showStream, setShowStream] = useState(false);
 
   const handleTestConn = async () => {
     setConnResult(null);
@@ -186,7 +189,23 @@ export function DeviceDetailPage() {
                 {unlockResult && <ResultBanner result={unlockResult} />}
               </div>
             )}
+            {device.rtsp_enabled && (
+              <div className="flex-1">
+                <Button
+                  variant="secondary"
+                  onClick={() => setShowStream((v) => !v)}
+                >
+                  <Video className="w-4 h-4" />
+                  {showStream ? "Скрыть видео" : "Смотреть видео"}
+                </Button>
+              </div>
+            )}
           </div>
+          {showStream && device.rtsp_enabled && (
+            <div className="mt-4 rounded-xl overflow-hidden border border-gray-200">
+              <WebRTCPlayer src={`panel-${device.id}`} />
+            </div>
+          )}
         </CardContent>
       </Card>
 

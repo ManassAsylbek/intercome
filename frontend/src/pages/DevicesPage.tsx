@@ -4,10 +4,11 @@ import { useDevices, useDeleteDevice } from "@/hooks/useDevices";
 import { Button } from "@/components/ui/Button";
 import { Badge, OnlineBadge } from "@/components/ui/Badge";
 import { DeviceFormModal } from "@/components/devices/DeviceFormModal";
+import { WebRTCPlayer } from "@/components/ui/WebRTCPlayer";
 import { toast } from "@/components/ui/Toast";
 import { DEVICE_TYPE_LABELS } from "@/lib/utils";
 import type { Device, DeviceType } from "@/types";
-import { Plus, Pencil, Trash2, Eye, Filter } from "lucide-react";
+import { Plus, Pencil, Trash2, Eye, Filter, Video, X } from "lucide-react";
 
 const DEVICE_TYPES: { value: string; label: string }[] = [
   { value: "", label: "Все типы" },
@@ -33,6 +34,7 @@ export function DevicesPage() {
   const [typeFilter, setTypeFilter] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [editDevice, setEditDevice] = useState<Device | null>(null);
+  const [streamDevice, setStreamDevice] = useState<Device | null>(null);
 
   const { data, isLoading } = useDevices(
     typeFilter ? { device_type: typeFilter } : undefined,
@@ -166,7 +168,12 @@ export function DevicesPage() {
                     <div className="flex gap-1">
                       {device.sip_enabled && <Badge variant="blue">SIP</Badge>}
                       {device.rtsp_enabled && (
-                        <Badge variant="purple">RTSP</Badge>
+                        <button
+                          onClick={() => setStreamDevice(device)}
+                          title="Смотреть видео"
+                        >
+                          <Badge variant="purple">RTSP</Badge>
+                        </button>
                       )}
                       {device.unlock_enabled && (
                         <Badge variant="green">Unlock</Badge>
@@ -175,6 +182,16 @@ export function DevicesPage() {
                   </td>
                   <td className="px-4 py-4">
                     <div className="flex items-center gap-2 justify-end">
+                      {device.rtsp_enabled && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          title="Смотреть видео"
+                          onClick={() => setStreamDevice(device)}
+                        >
+                          <Video className="w-4 h-4 text-purple-500" />
+                        </Button>
+                      )}
                       <Link to={`/devices/${device.id}`}>
                         <Button variant="ghost" size="sm" title="Details">
                           <Eye className="w-4 h-4" />
@@ -211,6 +228,32 @@ export function DevicesPage() {
         onClose={() => setModalOpen(false)}
         device={editDevice}
       />
+
+      {/* Видео-модал */}
+      {streamDevice && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={() => setStreamDevice(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl overflow-hidden w-[640px] max-w-[95vw]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+              <p className="font-semibold text-gray-900 text-sm">
+                {streamDevice.name} — видеопоток
+              </p>
+              <button
+                onClick={() => setStreamDevice(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <WebRTCPlayer src={`panel-${streamDevice.id}`} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
