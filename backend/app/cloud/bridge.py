@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import hmac
 import json
@@ -30,6 +31,20 @@ import random
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+
+# Set inside cloud-command handlers (_cmd_*) so that any DB write they perform
+# does NOT trigger an outbound apartment_upserted/device_upserted event back
+# to the cloud — cloud already knows what it just told us to do. API endpoints
+# that admin uses to mutate local state leave this False and DO fire events.
+_skip_outbound_mirror: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "cloud_mirror_skip_outbound", default=False
+)
+
+
+def is_mirror_suppressed() -> bool:
+    """True if the current async task should skip outbound mirroring events."""
+    return _skip_outbound_mirror.get()
 
 try:
     import websockets
@@ -240,10 +255,18 @@ class CloudBridge:
             "ping": self._cmd_ping,
             "provision_webrtc_endpoint": self._cmd_provision_endpoint,
             "revoke_webrtc_endpoint": self._cmd_revoke_endpoint,
+            "create_apartment": self._cmd_create_apartment,
+            "rename_apartment": self._cmd_rename_apartment,
+            "delete_apartment": self._cmd_delete_apartment,
             "set_apartment_monitors": self._cmd_set_monitors,
             "unlock_door": self._cmd_unlock_door,
             "reject_call": self._cmd_reject_call,
             "answer_call": self._cmd_answer_call,
+            "update_bridge_token": self._cmd_update_bridge_token,
+            # Cloud → bridge mirror state. No cmd_id, no ack required.
+            "bootstrap_snapshot": self._cmd_bootstrap_snapshot,
+            "apartment_upserted_ack": self._cmd_apartment_upserted_ack,
+            "device_upserted_ack": self._cmd_device_upserted_ack,
         }.get(cmd_type)
 
         if handler is None:
@@ -252,6 +275,10 @@ class CloudBridge:
                 await self.send_ack(cmd_id, False, error=f"unknown command: {cmd_type}")
             return
 
+        # Cloud-initiated commands must NOT trigger outbound apartment_upserted /
+        # device_upserted echoes. Set the context var for the duration of this
+        # handler — API endpoints (admin) leave it unset and DO fire echoes.
+        token = _skip_outbound_mirror.set(True)
         try:
             result = await handler(data, cmd_id=cmd_id)
             if cmd_id:
@@ -260,6 +287,8 @@ class CloudBridge:
             logger.error("cloud_ws_cmd_error", type=cmd_type, error=str(exc))
             if cmd_id:
                 await self.send_ack(cmd_id, False, error=str(exc))
+        finally:
+            _skip_outbound_mirror.reset(token)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Command handlers
@@ -267,6 +296,428 @@ class CloudBridge:
 
     async def _cmd_ping(self, data: dict, **_) -> dict:
         return {"pong": True, "ts": _utcnow()}
+
+    async def _cmd_update_bridge_token(self, data: dict, **_) -> dict:
+        """Cloud is rotating our bridge token.
+
+        Persist the new token to disk (so the next process start picks it up
+        from /app/data/cloud_bridge_token) and mutate ``settings`` in memory
+        so the reconnect loop, which reads ``settings.cloud_bridge_token`` on
+        every WS connect, uses the new token immediately. Cloud closes the
+        current WS with code 4005 right after our ack — our ``_reconnect_loop``
+        re-dials with the freshly persisted token.
+        """
+        new_token = (data or {}).get("new_token")
+        if not isinstance(new_token, str) or not new_token.strip():
+            raise RuntimeError("new_token is required and must be a non-empty string")
+        new_token = new_token.strip()
+
+        from app.core.runtime_token import persist_token
+        try:
+            persist_token(new_token)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to persist token: {exc}") from exc
+
+        settings.cloud_bridge_token = new_token
+        logger.info(
+            "cloud_bridge_token_rotated",
+            new_token_prefix=new_token[:6] + "…",
+        )
+        return {}
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Cloud → bridge mirror state (events, not commands — no ack required)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async def _cmd_bootstrap_snapshot(self, data: dict, **_) -> None:
+        """Cache cloud's view of entrances + devices for this bridge.
+
+        Sent fire-and-forget by cloud right after ``hello_ack`` (and after any
+        push_provisioning round). We use it for two things:
+
+          1. Populate the local ``entrances`` table so admin UI can show a
+             dropdown of valid entrance_ids when creating apartments/devices.
+          2. Backfill ``Device.cloud_id`` / ``Device.mac_address`` /
+             ``Device.entrance_id`` on existing local rows that cloud has
+             already onboarded — keyed by ``local_id`` (our own primary key
+             that cloud remembers from prior ``device_snapshot`` events).
+
+        Orphan devices (cloud has them, we don't) are logged but NOT auto-
+        created — bridge admin must register them locally first. Orphan
+        entrances ARE inserted: they're cloud-defined.
+        """
+        from app.db.session import AsyncSessionLocal
+        from app.models import Device, Entrance
+        from sqlalchemy import select
+
+        entrances = (data or {}).get("entrances") or []
+        devices = (data or {}).get("devices") or []
+        if not isinstance(entrances, list) or not isinstance(devices, list):
+            logger.warning("bootstrap_snapshot_invalid_shape", entrances=type(entrances).__name__)
+            return
+
+        async with AsyncSessionLocal() as db:
+            # ── Entrances: upsert by cloud_id ────────────────────────────
+            for ent in entrances:
+                if not isinstance(ent, dict):
+                    continue
+                cid = ent.get("id")
+                if cid is None:
+                    continue
+                result = await db.execute(
+                    select(Entrance).where(Entrance.cloud_id == cid)
+                )
+                row = result.scalar_one_or_none()
+                if row:
+                    row.number = str(ent.get("number") or row.number)
+                    row.building_id = ent.get("building_id")
+                    row.building_address = ent.get("building_address")
+                else:
+                    db.add(
+                        Entrance(
+                            cloud_id=cid,
+                            number=str(ent.get("number") or ""),
+                            building_id=ent.get("building_id"),
+                            building_address=ent.get("building_address"),
+                        )
+                    )
+
+            # ── Devices: backfill cloud_id / entrance_id / mac on local rows ──
+            matched, orphans = 0, 0
+            for d in devices:
+                if not isinstance(d, dict):
+                    continue
+                local_id = d.get("local_id")
+                cloud_dev_id = d.get("device_id")
+                if local_id is None:
+                    continue
+                dev = await db.get(Device, local_id)
+                if not dev:
+                    orphans += 1
+                    logger.info(
+                        "bootstrap_orphan_device",
+                        cloud_device_id=cloud_dev_id,
+                        local_id=local_id,
+                        mac=d.get("mac_address"),
+                        sip=d.get("sip_account"),
+                    )
+                    continue
+                if cloud_dev_id and dev.cloud_id != cloud_dev_id:
+                    dev.cloud_id = cloud_dev_id
+                if d.get("mac_address") and not dev.mac_address:
+                    dev.mac_address = d["mac_address"]
+                scope = d.get("scope") or {}
+                cloud_entrance_id = scope.get("entrance_id")
+                if cloud_entrance_id:
+                    # Resolve to our local FK via cloud_id we just upserted.
+                    er = await db.execute(
+                        select(Entrance).where(Entrance.cloud_id == cloud_entrance_id)
+                    )
+                    e_row = er.scalar_one_or_none()
+                    if e_row and dev.entrance_id != e_row.id:
+                        dev.entrance_id = e_row.id
+                dev.cloud_synced = True
+                dev.last_cloud_sync_error = None
+                matched += 1
+
+            await db.commit()
+
+        logger.info(
+            "bootstrap_snapshot_applied",
+            entrances=len(entrances),
+            devices_matched=matched,
+            devices_orphan=orphans,
+        )
+
+    async def _cmd_apartment_upserted_ack(self, data: dict, **_) -> None:
+        """Cloud confirms our apartment_upserted; persist returned IDs.
+
+        Matching key: (entrance_id, apartment_code). Cloud returns its own
+        ``apartment_id`` and (optionally) ``monitor_ids`` mapping
+        ``mac_address → device_id`` for hardware monitors.
+        """
+        from app.db.session import AsyncSessionLocal
+        from app.models import Apartment, ApartmentMonitor, Entrance
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+
+        apt_code = (data or {}).get("apartment_code")
+        cloud_apt_id = (data or {}).get("apartment_id")
+        cloud_entrance_id = (data or {}).get("entrance_id")
+        monitor_ids: dict = (data or {}).get("monitor_ids") or {}
+        if not apt_code:
+            logger.warning("apartment_upserted_ack_no_code", data=data)
+            return
+
+        async with AsyncSessionLocal() as db:
+            # Find the apartment. Prefer (entrance_id, call_code) when cloud
+            # echoes back entrance_id; otherwise fall back to call_code only.
+            stmt = (
+                select(Apartment)
+                .options(selectinload(Apartment.monitors))
+                .where(Apartment.call_code == apt_code)
+            )
+            if cloud_entrance_id:
+                er = await db.execute(
+                    select(Entrance).where(Entrance.cloud_id == cloud_entrance_id)
+                )
+                e_row = er.scalar_one_or_none()
+                if e_row:
+                    stmt = stmt.where(Apartment.entrance_id == e_row.id)
+
+            apt = (await db.execute(stmt)).scalars().first()
+            if not apt:
+                logger.warning(
+                    "apartment_upserted_ack_no_local_match",
+                    apt_code=apt_code,
+                    cloud_apt_id=cloud_apt_id,
+                )
+                return
+
+            if cloud_apt_id and apt.cloud_id != cloud_apt_id:
+                apt.cloud_id = cloud_apt_id
+            apt.cloud_synced = True
+            apt.last_cloud_sync_error = None
+
+            # Backfill cloud_id on monitors. Cloud keys monitor_ids by MAC
+            # when we sent one, else by sip_account (per cloud contract).
+            if monitor_ids and apt.monitors:
+                for mon in apt.monitors:
+                    cid = None
+                    if mon.mac_address and mon.mac_address in monitor_ids:
+                        cid = monitor_ids[mon.mac_address]
+                    elif mon.sip_account and mon.sip_account in monitor_ids:
+                        cid = monitor_ids[mon.sip_account]
+                    if cid is not None:
+                        mon.cloud_id = cid
+
+            await db.commit()
+            logger.info(
+                "apartment_upserted_ack_applied",
+                apt_code=apt_code,
+                cloud_apt_id=cloud_apt_id,
+                monitor_ids=monitor_ids,
+            )
+
+    async def _cmd_device_upserted_ack(self, data: dict, **_) -> None:
+        """Cloud confirms our device_upserted. Persist ``device_id``."""
+        from app.db.session import AsyncSessionLocal
+        from app.models import Device
+        from sqlalchemy import select
+
+        mac = (data or {}).get("mac_address")
+        local_id = (data or {}).get("local_id")
+        cloud_dev_id = (data or {}).get("device_id")
+        if not cloud_dev_id:
+            logger.warning("device_upserted_ack_no_device_id", data=data)
+            return
+
+        async with AsyncSessionLocal() as db:
+            dev: Device | None = None
+            if local_id:
+                dev = await db.get(Device, local_id)
+            if not dev and mac:
+                result = await db.execute(select(Device).where(Device.mac_address == mac))
+                dev = result.scalar_one_or_none()
+            if not dev:
+                logger.warning(
+                    "device_upserted_ack_no_local_match",
+                    mac=mac,
+                    local_id=local_id,
+                    cloud_dev_id=cloud_dev_id,
+                )
+                return
+
+            if dev.cloud_id != cloud_dev_id:
+                dev.cloud_id = cloud_dev_id
+            dev.cloud_synced = True
+            dev.last_cloud_sync_error = None
+            await db.commit()
+            logger.info(
+                "device_upserted_ack_applied",
+                local_id=dev.id,
+                mac=mac,
+                cloud_dev_id=cloud_dev_id,
+            )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Outbound mirror — called from API endpoints (admin actions)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async def emit_apartment_upserted(self, apartment_id: int) -> None:
+        """Send apartment_upserted for the given local apartment id.
+
+        Skipped automatically when called from inside a cloud command handler
+        (see _skip_outbound_mirror). Failure paths persist the error on the
+        apartment row so admin can see what went wrong and retry-on-startup
+        can pick it up next reboot.
+        """
+        if is_mirror_suppressed():
+            return
+        from app.db.session import AsyncSessionLocal
+        from app.models import Apartment, Entrance
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+
+        async with AsyncSessionLocal() as db:
+            apt = (
+                await db.execute(
+                    select(Apartment)
+                    .options(selectinload(Apartment.monitors))
+                    .where(Apartment.id == apartment_id)
+                )
+            ).scalar_one_or_none()
+            if not apt:
+                return
+
+            # We need a cloud-side entrance_id to send.
+            cloud_entrance_id: int | None = None
+            if apt.entrance_id:
+                er = await db.get(Entrance, apt.entrance_id)
+                if er:
+                    cloud_entrance_id = er.cloud_id
+
+            if cloud_entrance_id is None:
+                apt.cloud_synced = False
+                apt.last_cloud_sync_error = (
+                    "no entrance assigned — cannot mirror to cloud"
+                )
+                await db.commit()
+                logger.warning(
+                    "apartment_upsert_skipped_no_entrance",
+                    local_id=apt.id,
+                    call_code=apt.call_code,
+                )
+                return
+
+            payload = {
+                "entrance_id": cloud_entrance_id,
+                "apartment_code": apt.call_code,
+                "apartment_id": apt.cloud_id,
+                "number": apt.number,
+                "floor": apt.floor,
+                "monitors": [
+                    {
+                        "local_id": m.id,  # stable PK on our side — preferred matching key
+                        "sip_account": m.sip_account,
+                        "mac_address": m.mac_address,
+                        "model": m.model,
+                        "name": m.name,
+                    }
+                    for m in apt.monitors
+                ],
+            }
+
+            # Mark dirty BEFORE the network send — flip back to true only
+            # when the ack actually arrives. If we crash before ack, startup
+            # resync will re-fire.
+            apt.cloud_synced = False
+            await db.commit()
+
+        await self.send_event("apartment_upserted", payload)
+        logger.info(
+            "apartment_upsert_emitted",
+            local_id=apartment_id,
+            call_code=payload["apartment_code"],
+        )
+
+    async def emit_device_upserted(self, device_id: int) -> None:
+        """Send device_upserted for the given local device id. See above for
+        suppression and error-persistence semantics."""
+        if is_mirror_suppressed():
+            return
+        from app.db.session import AsyncSessionLocal
+        from app.models import Device, Entrance
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            dev = await db.get(Device, device_id)
+            if not dev:
+                return
+
+            cloud_entrance_id: int | None = None
+            if dev.entrance_id:
+                er = await db.get(Entrance, dev.entrance_id)
+                if er:
+                    cloud_entrance_id = er.cloud_id
+
+            if cloud_entrance_id is None:
+                dev.cloud_synced = False
+                dev.last_cloud_sync_error = (
+                    "no entrance assigned — cannot mirror to cloud"
+                )
+                await db.commit()
+                logger.warning(
+                    "device_upsert_skipped_no_entrance",
+                    local_id=dev.id,
+                    name=dev.name,
+                )
+                return
+
+            payload = {
+                "entrance_id": cloud_entrance_id,
+                "device": {
+                    "type": _map_device_type(
+                        dev.device_type.value if dev.device_type else ""
+                    ),
+                    "sip_account": dev.sip_account,
+                    "mac_address": dev.mac_address,
+                    "model": dev.model,
+                    "name": dev.name,
+                    "local_id": dev.id,
+                },
+            }
+
+            dev.cloud_synced = False
+            await db.commit()
+
+        await self.send_event("device_upserted", payload)
+        logger.info(
+            "device_upsert_emitted",
+            local_id=device_id,
+            mac=dev.mac_address,
+            name=dev.name,
+        )
+
+    async def resync_pending(self) -> None:
+        """Re-fire apartment_upserted / device_upserted for any rows where
+        ``cloud_synced=false`` AND no permanent error is set.
+
+        Called once on startup. Idempotent on cloud side, so safe to re-deliver.
+        """
+        from app.db.session import AsyncSessionLocal
+        from app.models import Apartment, Device
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            apt_ids = (
+                await db.execute(
+                    select(Apartment.id).where(
+                        Apartment.cloud_synced == False,  # noqa: E712
+                        Apartment.entrance_id.is_not(None),
+                    )
+                )
+            ).scalars().all()
+            dev_ids = (
+                await db.execute(
+                    select(Device.id).where(
+                        Device.cloud_synced == False,  # noqa: E712
+                        Device.entrance_id.is_not(None),
+                    )
+                )
+            ).scalars().all()
+
+        for aid in apt_ids:
+            await self.emit_apartment_upserted(aid)
+        for did in dev_ids:
+            await self.emit_device_upserted(did)
+
+        if apt_ids or dev_ids:
+            logger.info(
+                "cloud_mirror_resync_pending",
+                apartments=len(apt_ids),
+                devices=len(dev_ids),
+            )
 
     async def _cmd_provision_endpoint(self, data: dict, **_) -> dict:
         from app.db.session import AsyncSessionLocal
@@ -339,14 +790,184 @@ class CloudBridge:
 
         return {"extension": extension, "revoked": True}
 
-    async def _cmd_set_monitors(self, data: dict, **_) -> dict:
+    async def _cmd_create_apartment(self, data: dict, **_) -> dict:
+        """Idempotent INSERT apartment.
+
+        Sent by cloud right after admin creates an apartment in CRM, BEFORE
+        the corresponding ``set_apartment_monitors``. We just ensure the row
+        exists. If an admin races us (unlikely) and the row is already here,
+        we no-op and report ``created: false``.
+        """
         from app.db.session import AsyncSessionLocal
-        from app.models import Apartment, ApartmentMonitor, WebrtcEndpoint
+        from app.models import Apartment
+        from sqlalchemy import select
+
+        apartment_code = (data or {}).get("apartment_code")
+        if not apartment_code or not isinstance(apartment_code, str):
+            return {"success": False, "message": "apartment_code is required"}
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Apartment).where(Apartment.call_code == apartment_code)
+            )
+            existing = result.scalar_one_or_none()
+            if existing:
+                return {
+                    "success": True,
+                    "message": f"apartment {apartment_code} already exists",
+                    "apartment_local_id": existing.id,
+                    "created": False,
+                }
+
+            apt = Apartment(
+                number=apartment_code,
+                call_code=apartment_code,
+                enabled=True,
+            )
+            db.add(apt)
+            await db.commit()
+            await db.refresh(apt)
+            logger.info("apartment_created_via_ws", call_code=apartment_code, local_id=apt.id)
+            return {
+                "success": True,
+                "message": f"apartment {apartment_code} created",
+                "apartment_local_id": apt.id,
+                "created": True,
+            }
+
+    async def _cmd_rename_apartment(self, data: dict, **_) -> dict:
+        """UPDATE apartments.call_code and regenerate dialplan.
+
+        Old call_code disappears from the dialplan (panel calling the old
+        number now lands in extension-not-found), new call_code shows up
+        with the same monitor list — cloud will follow up with a fresh
+        ``set_apartment_monitors`` if monitors change too.
+        """
+        from app.db.session import AsyncSessionLocal
+        from app.models import Apartment
+        from sqlalchemy import select
+
+        old_code = (data or {}).get("old_apartment_code")
+        new_code = (data or {}).get("new_apartment_code")
+        if not old_code or not new_code:
+            return {
+                "success": False,
+                "message": "old_apartment_code and new_apartment_code are required",
+            }
+        if old_code == new_code:
+            return {
+                "success": True,
+                "message": "old and new code are identical, no-op",
+            }
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Apartment).where(Apartment.call_code == old_code)
+            )
+            apt = result.scalar_one_or_none()
+            if not apt:
+                return {
+                    "success": False,
+                    "message": f"apartment with call_code={old_code} not found",
+                }
+
+            # Reject if new code already taken by another apartment.
+            result = await db.execute(
+                select(Apartment).where(Apartment.call_code == new_code)
+            )
+            collision = result.scalar_one_or_none()
+            if collision and collision.id != apt.id:
+                return {
+                    "success": False,
+                    "message": f"apartment with call_code={new_code} already exists (id={collision.id})",
+                }
+
+            apt.call_code = new_code
+            # number defaults to old call_code if user never customized it;
+            # don't surprise the operator, leave as is.
+            await db.commit()
+            local_id = apt.id
+
+        await self._rebuild_all_dialplan()
+        logger.info(
+            "apartment_renamed_via_ws",
+            old=old_code,
+            new=new_code,
+            local_id=local_id,
+        )
+        return {
+            "success": True,
+            "message": f"apartment renamed {old_code} → {new_code}",
+            "apartment_local_id": local_id,
+        }
+
+    async def _cmd_delete_apartment(self, data: dict, **_) -> dict:
+        """DELETE apartment (with monitor cascade) and regenerate dialplan.
+
+        Idempotent: missing apartment is treated as a successful no-op so
+        cloud's drain-then-delete sequence is safe to re-deliver.
+        """
+        from app.db.session import AsyncSessionLocal
+        from app.models import Apartment, ApartmentMonitor
+        from sqlalchemy import select
+
+        apartment_code = (data or {}).get("apartment_code")
+        if not apartment_code:
+            return {"success": False, "message": "apartment_code is required"}
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Apartment).where(Apartment.call_code == apartment_code)
+            )
+            apt = result.scalar_one_or_none()
+            if not apt:
+                return {
+                    "success": True,
+                    "message": f"apartment {apartment_code} not found (no-op)",
+                    "deleted": False,
+                }
+
+            # Explicit cascade — Apartment FKs may not declare ON DELETE.
+            await db.execute(
+                ApartmentMonitor.__table__.delete().where(
+                    ApartmentMonitor.apartment_id == apt.id
+                )
+            )
+            local_id = apt.id
+            await db.delete(apt)
+            await db.commit()
+
+        await self._rebuild_all_dialplan()
+        logger.info(
+            "apartment_deleted_via_ws",
+            call_code=apartment_code,
+            local_id=local_id,
+        )
+        return {
+            "success": True,
+            "message": f"apartment {apartment_code} deleted",
+            "apartment_local_id": local_id,
+            "deleted": True,
+        }
+
+    async def _cmd_set_monitors(self, data: dict, **_) -> dict:
+        """Replace monitors for an apartment. Idempotent — auto-creates apt.
+
+        Cloud's standard sequence is ``create_apartment`` then
+        ``set_apartment_monitors``, but Kafka-event ordering and reconnect
+        races mean we may see ``set_apartment_monitors`` first. In that case
+        we create the row on the fly so monitor sync never blocks on a
+        missing parent.
+        """
+        from app.db.session import AsyncSessionLocal
+        from app.models import Apartment, ApartmentMonitor
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
 
-        apartment_code = data["apartment_code"]
-        monitors: list[str] = data.get("monitors", [])
+        apartment_code = (data or {}).get("apartment_code")
+        if not apartment_code:
+            return {"success": False, "message": "apartment_code is required"}
+        monitors: list[str] = (data or {}).get("monitors", []) or []
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(
@@ -355,19 +976,42 @@ class CloudBridge:
                 .where(Apartment.call_code == apartment_code)
             )
             apt = result.scalar_one_or_none()
+            created = False
             if not apt:
-                raise ValueError(f"Apartment with call_code={apartment_code} not found")
+                apt = Apartment(
+                    number=apartment_code,
+                    call_code=apartment_code,
+                    enabled=True,
+                )
+                db.add(apt)
+                await db.flush()
+                created = True
+                logger.info(
+                    "apartment_auto_created",
+                    call_code=apartment_code,
+                    reason="unknown_in_set_monitors",
+                )
 
-            # Replace monitors (skip validation — cloud is authoritative)
             await db.execute(
-                ApartmentMonitor.__table__.delete().where(ApartmentMonitor.apartment_id == apt.id)
+                ApartmentMonitor.__table__.delete().where(
+                    ApartmentMonitor.apartment_id == apt.id
+                )
             )
             for ext in monitors:
                 db.add(ApartmentMonitor(apartment_id=apt.id, sip_account=ext, label=None))
             await db.commit()
 
         await self._rebuild_all_dialplan()
-        return {"apartment_code": apartment_code, "monitors": monitors}
+        return {
+            "success": True,
+            "message": (
+                f"monitors set for {apartment_code} ({len(monitors)} entries)"
+                + (", apartment auto-created" if created else "")
+            ),
+            "apartment_code": apartment_code,
+            "monitors": monitors,
+            "apartment_created": created,
+        }
 
     async def _cmd_unlock_door(self, data: dict, **_) -> dict:
         """Unlock the panel that placed the active call (or one given by id).
@@ -772,10 +1416,18 @@ def _map_unlock_method(method: str) -> str:
 
 
 def _map_device_type(dt: str) -> str:
+    """Map our local DeviceType to cloud's device_type enum.
+
+    Cloud enum (as of migration c7e1a2f4b8d3): panel | monitor | camera |
+    reader | barrier | controller | sensor. ``monitor`` exists only after
+    cloud has applied that migration; before then cloud will collapse it to
+    the default ``panel`` — that's fine, we send the semantically correct
+    value and cloud upgrades on its own schedule.
+    """
     mapping = {
         "door_station": "panel",
-        "home_station": "controller",
-        "guard_station": "controller",
+        "home_station": "monitor",
+        "guard_station": "monitor",
         "sip_client": "controller",
         "camera": "camera",
     }

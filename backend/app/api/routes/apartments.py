@@ -90,6 +90,8 @@ async def create_apartment(
         call_code=payload.call_code,
         notes=payload.notes,
         enabled=payload.enabled,
+        floor=payload.floor,
+        entrance_id=payload.entrance_id,
         cloud_relay_enabled=payload.cloud_relay_enabled,
         cloud_sip_account=payload.cloud_sip_account,
     )
@@ -97,11 +99,23 @@ async def create_apartment(
     await db.flush()
 
     for m in payload.monitors:
-        db.add(ApartmentMonitor(apartment_id=apt.id, sip_account=m.sip_account, label=m.label))
+        db.add(
+            ApartmentMonitor(
+                apartment_id=apt.id,
+                sip_account=m.sip_account,
+                label=m.label,
+                mac_address=m.mac_address,
+                model=m.model,
+                name=m.name,
+            )
+        )
 
     await db.commit()
     apt = await _get_apartment(db, apt.id)
     await _rebuild_dialplan(db)
+    # Mirror to cloud (no-op if called from a cloud-command code path).
+    from app.cloud.bridge import cloud_bridge
+    await cloud_bridge.emit_apartment_upserted(apt.id)
     return apt
 
 
@@ -136,6 +150,10 @@ async def update_apartment(
         apt.notes = payload.notes
     if payload.enabled is not None:
         apt.enabled = payload.enabled
+    if payload.floor is not None:
+        apt.floor = payload.floor
+    if payload.entrance_id is not None:
+        apt.entrance_id = payload.entrance_id
     if payload.cloud_relay_enabled is not None:
         apt.cloud_relay_enabled = payload.cloud_relay_enabled
     if payload.cloud_sip_account is not None:
@@ -149,11 +167,22 @@ async def update_apartment(
             )
         )
         for m in payload.monitors:
-            db.add(ApartmentMonitor(apartment_id=apt_id, sip_account=m.sip_account, label=m.label))
+            db.add(
+                ApartmentMonitor(
+                    apartment_id=apt_id,
+                    sip_account=m.sip_account,
+                    label=m.label,
+                    mac_address=m.mac_address,
+                    model=m.model,
+                    name=m.name,
+                )
+            )
 
     await db.commit()
     apt = await _get_apartment(db, apt_id)
     await _rebuild_dialplan(db)
+    from app.cloud.bridge import cloud_bridge
+    await cloud_bridge.emit_apartment_upserted(apt_id)
     return apt
 
 

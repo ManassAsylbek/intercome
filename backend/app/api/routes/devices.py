@@ -46,6 +46,8 @@ async def create_device(
     current_user: User = Depends(get_current_user),
 ):
     device = await device_service.create_device(db, payload, actor=current_user.username)
+    from app.cloud.bridge import cloud_bridge
+    await cloud_bridge.emit_device_upserted(device.id)
     return device
 
 
@@ -72,6 +74,8 @@ async def update_device(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     device = await device_service.update_device(db, device, payload, actor=current_user.username)
+    from app.cloud.bridge import cloud_bridge
+    await cloud_bridge.emit_device_upserted(device.id)
     return device
 
 

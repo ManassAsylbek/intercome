@@ -46,6 +46,16 @@ class DeviceBase(BaseModel):
     enabled: bool = True
     notes: Optional[str] = None
 
+    # Cloud mirror inputs (admin enters MAC, picks an entrance from
+    # /api/entrances). Cloud-side IDs come back via ack and live in DeviceOut.
+    # entrance_id is required for the same reason as on ApartmentCreate.
+    mac_address: Optional[str] = Field(None, max_length=32)
+    model: Optional[str] = Field(None, max_length=128)
+    entrance_id: int = Field(
+        ...,
+        description="Local FK to entrances.id. List via GET /api/entrances.",
+    )
+
     # SIP
     sip_enabled: bool = False
     sip_account: Optional[str] = None
@@ -80,6 +90,9 @@ class DeviceUpdate(BaseModel):
     web_port: Optional[int] = Field(None, ge=1, le=65535)
     enabled: Optional[bool] = None
     notes: Optional[str] = None
+    mac_address: Optional[str] = Field(None, max_length=32)
+    model: Optional[str] = Field(None, max_length=128)
+    entrance_id: Optional[int] = None
     sip_enabled: Optional[bool] = None
     sip_account: Optional[str] = None
     sip_password: Optional[str] = None
@@ -98,6 +111,9 @@ class DeviceUpdate(BaseModel):
 
 class DeviceOut(DeviceBase):
     id: int
+    cloud_id: Optional[int] = None
+    cloud_synced: bool = False
+    last_cloud_sync_error: Optional[str] = None
     is_online: Optional[bool] = None
     last_seen: Optional[datetime] = None
     created_at: datetime
@@ -161,12 +177,19 @@ class RoutingRuleListOut(BaseModel):
 class ApartmentMonitorIn(BaseModel):
     sip_account: str = Field(..., min_length=1, max_length=128)
     label: Optional[str] = Field(None, max_length=128)
+    mac_address: Optional[str] = Field(None, max_length=32)
+    model: Optional[str] = Field(None, max_length=128)
+    name: Optional[str] = Field(None, max_length=128)
 
 
 class ApartmentMonitorOut(BaseModel):
     id: int
     sip_account: str
     label: Optional[str] = None
+    mac_address: Optional[str] = None
+    model: Optional[str] = None
+    name: Optional[str] = None
+    cloud_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
@@ -176,6 +199,14 @@ class ApartmentCreate(BaseModel):
     call_code: str = Field(..., min_length=1, max_length=64)
     notes: Optional[str] = None
     enabled: bool = True
+    floor: Optional[int] = None
+    # Required: pick from GET /api/entrances. Without it the apartment will
+    # never be mirrored to cloud — better to fail fast at validation than to
+    # leave a stale local-only row that admin doesn't realize is broken.
+    entrance_id: int = Field(
+        ...,
+        description="Local FK to entrances.id. List available entrances via GET /api/entrances.",
+    )
     cloud_relay_enabled: bool = False
     cloud_sip_account: Optional[str] = Field(None, max_length=128)
     monitors: list[ApartmentMonitorIn] = []
@@ -186,6 +217,8 @@ class ApartmentUpdate(BaseModel):
     call_code: Optional[str] = Field(None, min_length=1, max_length=64)
     notes: Optional[str] = None
     enabled: Optional[bool] = None
+    floor: Optional[int] = None
+    entrance_id: Optional[int] = None
     cloud_relay_enabled: Optional[bool] = None
     cloud_sip_account: Optional[str] = Field(None, max_length=128)
     monitors: Optional[list[ApartmentMonitorIn]] = None
@@ -207,12 +240,27 @@ class ApartmentOut(BaseModel):
     call_code: str
     notes: Optional[str] = None
     enabled: bool
+    floor: Optional[int] = None
+    entrance_id: Optional[int] = None
+    cloud_id: Optional[int] = None
+    cloud_synced: bool = False
+    last_cloud_sync_error: Optional[str] = None
     cloud_relay_enabled: bool = False
     cloud_sip_account: Optional[str] = None
     monitors: list[ApartmentMonitorOut] = []
     source_devices: list[ApartmentSourceDeviceOut] = []
     created_at: datetime
     updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class EntranceOut(BaseModel):
+    id: int
+    cloud_id: int
+    number: str
+    building_id: Optional[int] = None
+    building_address: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

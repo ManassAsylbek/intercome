@@ -62,9 +62,18 @@ async def lifespan(app: FastAPI):
     register_all(ami_client)
     await ami_client.start()
 
-    # Start cloud WebSocket bridge (outgoing persistent connection)
+    # Start cloud WebSocket bridge (outgoing persistent connection).
+    # Apply persisted token override first — if cloud has rotated our token
+    # via update_bridge_token, the new value lives in /app/data/, not env.
+    from app.core.runtime_token import apply_persisted_token_override
+    apply_persisted_token_override(settings)
     from app.cloud.bridge import cloud_bridge
     await cloud_bridge.start()
+
+    # Durability: replay any apartment_upserted/device_upserted that didn't
+    # get an ack before the previous shutdown. Idempotent on cloud side, so
+    # safe even if we end up double-sending one of them.
+    asyncio.create_task(cloud_bridge.resync_pending(), name="cloud-mirror-resync")
 
     # Sync RTSP devices into go2rtc (always-on warm connections to panels)
     from app.services.go2rtc_service import sync_all_from_db

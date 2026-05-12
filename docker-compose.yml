@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Скопируйте .env.example → .env и задайте SERVER_IP перед запуском:
 #   cp .env.example .env
 #   docker compose up -d

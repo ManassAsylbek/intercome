@@ -89,6 +89,18 @@ class Device(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Cloud mirror: identity + sync state. mac_address is the natural key
+    # cloud uses to track the same physical device across moves; cloud_id is
+    # the authoritative cloud-side id we cache so we don't re-create rows.
+    mac_address: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    entrance_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("entrances.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    cloud_id: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True)
+    cloud_synced: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_cloud_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # SIP
     sip_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     sip_account: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -199,6 +211,34 @@ class ActivityLog(Base):
     device: Mapped["Device | None"] = relationship("Device", back_populates="activity_logs")
 
 
+# ─── Entrance (mirrored from cloud bootstrap_snapshot) ───────────────────────
+
+
+class Entrance(Base):
+    """Подъезд (entrance) — cloud-defined, cached locally.
+
+    Bridge does NOT manage entrances itself; they arrive in cloud's
+    ``bootstrap_snapshot`` after every reconnect. We just need to know they
+    exist so we can attach apartments/devices to them when sending the
+    reverse ``apartment_upserted`` / ``device_upserted`` events.
+    """
+
+    __tablename__ = "entrances"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    cloud_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True, index=True)
+    number: Mapped[str] = mapped_column(String(50), nullable=False)
+    building_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    building_address: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
 # ─── Apartment ────────────────────────────────────────────────────────────────
 
 
@@ -212,6 +252,15 @@ class Apartment(Base):
     call_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    floor: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Cloud mirror: belongs-to entrance + cached cloud-side id + sync status.
+    entrance_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("entrances.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    cloud_id: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True)
+    cloud_synced: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_cloud_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Cloud relay: forward call to cloud SIP trunk → mobile app users
     cloud_relay_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -239,7 +288,12 @@ class Apartment(Base):
 
 
 class ApartmentMonitor(Base):
-    """A single SIP account (monitor/phone) belonging to an apartment."""
+    """A single SIP account (monitor/phone) belonging to an apartment.
+
+    Stores the device-side attributes (mac/model/name) needed by the cloud
+    apartment_upserted event when this is a hardware monitor rather than a
+    pure SIP account (e.g. mobile WebRTC).
+    """
 
     __tablename__ = "apartment_monitors"
 
@@ -249,6 +303,10 @@ class ApartmentMonitor(Base):
     )
     sip_account: Mapped[str] = mapped_column(String(128), nullable=False)
     label: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    mac_address: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    cloud_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     apartment: Mapped["Apartment"] = relationship("Apartment", back_populates="monitors")
 
