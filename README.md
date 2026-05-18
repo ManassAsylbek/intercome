@@ -1,566 +1,396 @@
-# Intercom Management System
+# Intercom Management System — Bridge
 
-Система управления IP-домофоном. Объединяет Asterisk PBX, FastAPI бэкенд, React фронтенд и go2rtc в одном Docker-стеке. Позволяет принимать звонки с дверных панелей, калиток и шлагбаумов прямо в браузере: видеть кто звонит, разговаривать через WebRTC, открывать дверь. Поддерживает многоквартирные дома — несколько мониторов в квартире, несколько источников вызова, облачная переадресация на мобильное приложение.
-
----
-
-## Что умеет
-
-- 📞 **SIP в браузере** — принять/сбросить звонок прямо в браузере (JsSIP + WebRTC over WSS)
-- 🎥 **Live видео** — WebRTC видеопоток с камеры двери через go2rtc (без плагинов)
-- 🔔 **Одновременный звонок** — звонок идёт сразу на браузер, все мониторы квартиры и в облако
-- 🏢 **Квартиры** — каждая квартира имеет код вызова и список мониторов; диалплан генерируется автоматически
-- 📡 **Облачная переадресация** — при включении звонок через SIP-транк идёт в облако к мобильным пользователям
-- 🚪 **Несколько источников** — любое количество дверей/калиток/шлагбаумов на одну квартиру
-- 🔓 **Открытие двери** — кнопка в браузере отправляет HTTP-команду на разблокировку замка
-- 📋 **Управление устройствами** — добавление/редактирование, SIP в Asterisk через кнопку
-- 🔐 **HTTPS + JWT** — самоподписанный SSL, JWT-аутентификация
-- 📊 **Дашборд** — статус устройств, активные звонки, лог активности
+Локальный bridge-сервер IP-домофонной системы. Связывает физические устройства подъезда (панели вызова, hardware-мониторы, замки) с облачным CRM и мобильным приложением. Базируется на Docker Compose: Asterisk + FastAPI + React + go2rtc + Postgres + coturn.
 
 ---
 
-## Архитектура
+## 1. Сетевая топология
 
 ```
-[Дверь / Калитка / Шлагбаум]
-  SIP 1002 / 1004 / 1005                    Набирает call_code квартиры
-        │                                   (напр. 1042)
-        ▼
-[Asterisk PBX]  ─── network_mode: host ───  порт 5060/UDP
+                                    Internet / любая сеть
+                                              │
+                                    https://dev-api-intercom.docx.kg
+                                              │   (Let's Encrypt cert, nginx-reverse-proxy)
+                                              │
+                            ┌─────────────────┴─────────────────┐
+                            ▼                                   ▼
+                       Cloud (CRM)                         Mobile app (Flutter)
+                       Web admin UI                        — REGISTER через WSS
+                       FCM push                            — WHEP видео
+                       Kafka events                        — JWT-auth к /api/mobile/*
+                            │
+                            │   wss://dev-api-intercom.docx.kg/api/devices/bridges/ws
+                            │   (Bearer: CLOUD_BRIDGE_TOKEN)
+                            ▼
+              ┌─────────────────────────────┐
+              │   Bridge — этот сервер      │   LAN: 192.168.31.132
+              │   docker compose со 6       │   (плюс 10.2.2.x на VPN-интерфейсе)
+              │   контейнерами              │
+              └─────────────────────────────┘
+                            │
+                            ▼ LAN 192.168.31.0/24
+                  ┌─────────┴─────────┐
+                  ▼                   ▼
+            Domofon-панели       Hardware-мониторы
+            (sip_account=1001)   (sip_account=1003, 1004, …)
+            ├ IP:80 web/unlock   ├ только SIP-UA
+            ├ IP:554 RTSP        └ зарегистрированы по UDP
+            └ SIP UDP/5060          в наш Asterisk
+```
+
+## 2. Контейнеры на bridge'е
+
+```
+┌─────────────────┐     ┌─────────────────┐
+│  intercom-      │ ←── │  intercom-      │ ←── HTTPS :80/:443 от admin/mobile
+│  frontend       │     │  nginx          │     /api/* → backend
+│  (React UI)     │     │  TLS termination│     /go2rtc/* → go2rtc
+└─────────────────┘     │  /sip & /asterisk
+                        │  /ws → Asterisk │
+                        └─────────────────┘
+                                │
+                ┌───────────────┼───────────────┐
+                ▼               ▼               ▼
+        ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+        │  backend     │  │ asterisk     │  │  go2rtc      │
+        │ (FastAPI)    │  │  PJSIP+AMI   │  │  RTSP→WHEP   │
+        │ :8000        │  │  :5060 UDP   │  │  :1984       │
+        │              │  │  :8088 WS    │  │  :8555 WebRTC│
+        │ ↔ Cloud WS   │  │ ↔ AMI :5038  │  │              │
+        │ ↔ AMI :5038  │←─┤  ↔ devices   │  │              │
+        │ ↔ Postgres   │  └──────────────┘  └──────────────┘
+        └──────────────┘
+                │
+                ▼
+        ┌──────────────┐                    ┌──────────────┐
+        │  postgres    │                    │  coturn      │
+        │  :5432       │                    │  :3478 STUN  │
+        │              │                    │  TURN UDP+TCP│
+        └──────────────┘                    └──────────────┘
+```
+
+| Контейнер    | За что отвечает                                                                                                                                                           |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **backend**  | FastAPI: апартменты, устройства, событийный bus, **cloud-bridge WS** (исходящий), **AMI** к Asterisk, **provisioning** `pjsip_webrtc.conf` и `extensions_apartments.conf` |
+| **asterisk** | SIP-роутинг: панели/мониторы по UDP, мобильные клиенты по WSS, dialplan через `[intercom]` → `include intercom-apartments`                                                |
+| **go2rtc**   | RTSP-камеры → WHEP/HLS для просмотра «через глазок» в браузере и мобиле                                                                                                   |
+| **coturn**   | STUN+TURN для WebRTC, HMAC-secret для short-lived creds                                                                                                                   |
+| **postgres** | Все persistent-данные (apartments, devices, monitors, webrtc_endpoints, entrances, activity logs)                                                                         |
+| **frontend** | React-админка + nginx-фронт (TLS, прокси `/api/`, `/sip`, `/asterisk/ws`, `/go2rtc/`)                                                                                     |
+
+## 3. Кого на bridge'е регистрируют
+
+Три типа SIP-endpoint'ов, все живут в Asterisk PJSIP:
+
+| Тип                             | Где описан                                                     | Транспорт                          | Кто это                                   |
+| ------------------------------- | -------------------------------------------------------------- | ---------------------------------- | ----------------------------------------- |
+| **Hardware (панели, мониторы)** | `pjsip.conf` — managed-блоки `[1001]`/`[1003]`/`[1004]`        | UDP 5060                           | Физические устройства в подъезде/квартире |
+| **Browser SIP**                 | `pjsip.conf` — `[1099]` фиксированный                          | WS 8088 (через nginx /sip)         | Тест-клиент в web-админке                 |
+| **Mobile WebRTC**               | `pjsip_webrtc.conf` — auto-generated `[200001]`, `[200002]`, … | WS 8088 (через nginx /asterisk/ws) | Flutter мобильное приложение              |
+
+Mobile-endpoint'ы создаются **облаком** через WS-команду `provision_webrtc_endpoint` — это единственный способ, локально admin их не делает.
+
+## 4. Что приходит от cloud → bridge (WS-команды)
+
+```
+                cloud
+                  │
+                  │  wss://…/api/devices/bridges/ws
+                  │  Bearer: CLOUD_BRIDGE_TOKEN
+                  ▼
+                bridge backend
+       (handlers в _dispatch_command)
+                  │
+   ┌──────────────┼──────────────┬──────────────┬──────────────┬──────────────┐
+   ▼              ▼              ▼              ▼              ▼              ▼
+provision_     create_         rename_       delete_       set_apartment    bootstrap_
+webrtc_        apartment       apartment     apartment     _monitors        snapshot
+endpoint       create row      rename        cascade       refresh         entrances[]
+write          apartments      call_code     delete row    apartment_       devices[]
+pjsip_webrtc   table                                       monitors;        (read-only
+.conf;                                                     regen dialplan   sync)
+pjsip reload
+
+   ▼              ▼              ▼              ▼              ▼
+unlock_door    answer_call    reject_call   re_invite_      update_bridge_
+HTTP→device   verify mobile  hangup ALL    apartment        token
+              leg exists      legs in       AMI Originate    persist + mutate
+              else fail       group         to mobile        settings, await
+                              individually  bridge to panel  close 4005
+```
+
+Что bridge шлёт обратно (events): `hello`, `device_snapshot`, `apartment_upserted`, `device_upserted`, `call_started`, `call_answered`, `call_ended`, `door_unlocked`, `system_health`, `media_config`, `ack` (на каждую WS-команду).
+
+## 5. Полный жизненный цикл от подключения устройства до звонка
+
+### Шаг 1. Admin добавляет апартмент и устройства через web-UI
+
+```
+admin → POST /api/apartments     {number: "101", call_code: "1003",
+                                  entrance_id: 1, floor: 3, monitors: [
+                                    {sip_account: "1003", mac_address: "AA:..."},
+                                  ]}
         │
-        │  Dial одновременно:
-        ├─── PJSIP/1099  ────────────────── Браузер (WebRTC/WSS через nginx)
-        ├─── PJSIP/1001  ────────────────── Монитор 1 (Гостиная)
-        ├─── PJSIP/1003  ────────────────── Монитор 2 (Спальня)
-        └─── PJSIP/1042@cloud-trunk ──────── Облако → мобильное приложение (если включено)
-                                             (опционально — CLOUD_SIP_TRUNK_ENDPOINT)
+        ├─→ INSERT apartments + apartment_monitors          (Postgres)
+        ├─→ write_apartments_dialplan() → extensions_apartments.conf
+        │                                ↳ dialplan reload (AMI)
+        └─→ emit_apartment_upserted() → cloud
+            └─→ cloud upserts in CRM, ack с cloud_id
+
+admin → POST /api/devices        {name: "Front Door Panel", device_type: "door_station",
+                                  ip_address: "192.168.31.43", sip_account: "1001",
+                                  rtsp_enabled: true, rtsp_url: "rtsp://…",
+                                  entrance_id: 1, mac_address: "BB:..."}
         │
-[Nginx :443 HTTPS]
-  /sip      → ws://asterisk:8088/ws   (WebSocket для JsSIP)
-  /api/     → http://backend:8000      (REST API)
-  /go2rtc/  → http://go2rtc:1984       (WebRTC видео)
+        ├─→ INSERT devices                                  (Postgres)
+        ├─→ go2rtc_service.sync_stream(device_id, rtsp_url)
+        │                                ↳ переписывает go2rtc.yaml
+        └─→ emit_device_upserted() → cloud
+            └─→ ack с cloud_id
 
-[FastAPI Backend :8000]
-  - CRUD: devices, apartments, routing_rules
-  - SIP apply: пишет pjsip.conf + extensions.conf, docker exec перезагружает Asterisk
-  - Webhooks: call_start / call_end от Asterisk
-  - SSE: события звонков → браузер
-
-[go2rtc :1984]       — RTSP → WebRTC конвертер
-[coturn  :3478]      — STUN-сервер для WebRTC ICE
+admin → POST /api/devices/{id}/sip-apply  {password: "..."}
+        │
+        └─→ sip_service.apply_credentials()
+            └─→ injects [{ext}] managed block в pjsip.conf
+                + module reload res_pjsip.so (AMI)
 ```
 
-> **Важно:** `network_mode: host` (Asterisk) работает только на **Linux**. На macOS SIP/RTP не работает через Docker NAT.
+### Шаг 2. Hardware-устройство регистрируется
+
+```
+panel 1001 (Hikvision) ──REGISTER──→ asterisk:5060 UDP
+                       ←──401  WWW-Authenticate realm="192.168.31.132"
+                       ──REGISTER+Digest─→
+                       ←──200 OK Expires:299
+                       (повторяет каждые 300 сек)
+
+→ pjsip show contacts:
+    Contact: 1001/sip:1001@192.168.31.43:5060   NonQual
+```
+
+### Шаг 3. Mobile-клиент проходит онбординг
+
+```
+1. Юзер логинится в Flutter → cloud отдаёт JWT
+2. Cloud:  POST /internal/provisioning-snapshot → знает наш bridge_id
+3. Cloud → bridge: provision_webrtc_endpoint {extension: "200001", password: "..."}
+4. Bridge: → INSERT webrtc_endpoints + write pjsip_webrtc.conf + pjsip reload
+           → ack {extension, sip_ws_url: "wss://192.168.31.132/asterisk/ws",
+                  sip_domain: "192.168.31.132", stun: "stun:192.168.31.132:3478"}
+5. Cloud сохраняет ack в bridges.media_config.sip → отдаёт мобиле
+   через GET /api/mobile/media-config
+6. Flutter:
+   sip.js connect wss://192.168.31.132/asterisk/ws  (или wss://dev-api-…
+                                                     если bridge публичный)
+   REGISTER sip:200001@192.168.31.132
+   ← 401 Digest realm="192.168.31.132"
+   REGISTER+Digest →
+   ← 200 OK Expires:60
+   → pjsip show contacts:
+       Contact: 200001/sip:abc@*.invalid;transport=WS
+```
+
+### Шаг 4. Cloud делает push_provisioning
+
+```
+Cloud при reconnect или setup-apartment шлёт:
+  · provision_webrtc_endpoint(s)
+  · set_apartment_monitors {apartment_code: "1003",
+                             monitors: ["1003", "200001"]}
+  · bootstrap_snapshot {entrances[], devices[]}
+                                          ↑
+                  fire-and-forget broadcast, ack не нужен
+```
+
+После `set_apartment_monitors`:
+
+```
+extensions_apartments.conf теперь:
+
+[intercom-apartments]
+; === apt: 1003 ===
+exten => 1003,1,NoOp(Call to apartment 1003)
+ same => n,Set(__CALL_ID=${UNIQUEID})
+ same => n,Set(__APARTMENT_CODE=1003)
+ same => n,Dial(PJSIP/1003 & PJSIP/200001, 30, tT)
+ same => n,Hangup()
+; === end apt: 1003 ===
+```
+
+И главный `extensions.conf` сводится к:
+
+```
+[intercom]
+include => intercom-apartments
+exten => h,1,NoOp(Hangup: ${CALLERID(num)})
+```
+
+## 6. Звонок панель → квартира (полный путь)
+
+```
+1. Жилец нажал кнопку «1003» на панели у входа
+   panel 1001 → asterisk: INVITE sip:1003@192.168.31.132 SDP(audio UDP)
+
+2. Asterisk:
+   - Найдена exten 1003 в context intercom (через include → intercom-apartments)
+   - Set __CALL_ID = ${UNIQUEID} = "1778683456.789"
+   - Dial(PJSIP/1003 & PJSIP/200001, 30, tT)
+     ├─→ INVITE PJSIP/1003 UDP → hardware monitor в квартире
+     └─→ INVITE PJSIP/200001 WS → mobile (если контакт жив)
+
+3. AMI events:
+   - DialBegin (Linkedid=Uniqueid=1778683456.789)
+     └─→ consumer.on_dial_begin
+         ├─→ call_store.on_call_started(call_id="1778683456.789")
+         ├─→ event_bus.publish("call_started", ...) → local SSE
+         └─→ cloud_bridge.send_event("call_started", {
+               call_id, caller_device_id, video_webrtc_url,
+               video_hls_url, apartment_code: "1003"
+             })
+
+4. Cloud:
+   - Получает call_started → создаёт запись в Kafka intercom.calls
+   - SSE → mobile-clients: "incoming call"
+   - FCM push → если приложение в фоне
+
+5. Mobile:
+   - Получает CallKit incoming UI
+   - Юзер тапает Accept → POST /api/mobile/calls/answer
+     └─→ cloud → bridge: answer_call {call_id, answered_by_sip: "200001"}
+         └─→ bridge ищет в CoreShowChannels канал PJSIP/200001-* с тем же Linkedid
+             ├─ если есть → call_answered → cloud silences other devices → ack ok
+             └─ если нет (mobile contact умер в Doze) → "callee_leg_missing"
+                 └─→ cloud → bridge: re_invite_apartment {call_id, callee_sip_extension: "200001"}
+                     ├─→ poll "pjsip show contacts" пока mobile не зарегистрируется (≤10s)
+                     ├─→ AMI Originate {Channel: PJSIP/200001, Application: Bridge,
+                     │                  Data: <panel_chan>, Async: true}
+                     └─→ ack ok, audio_status: established
+
+6. Mobile отвечает SIP 200 OK на INVITE:
+   - Asterisk → BridgeEnter event → consumer.on_bridge_enter
+     └─→ call_answered → cloud
+   - Audio: SRTP(mobile) ↔ Asterisk media bridge ↔ RTP(panel) — Asterisk транскодит DTLS↔plain
+   - Hardware monitor получает CANCEL (parallel dial cancels losers)
+
+7. Юзер слушает гостя, нажимает «Open Door»:
+   - POST /api/mobile/calls/unlock
+     └─→ cloud → bridge: unlock_door {call_id, device_local_id: 2}
+         └─→ bridge → HTTP GET http://192.168.31.43:8000/unlock?lock=1
+             └─→ event_bus.publish("door_opened", ...) → cloud (door_unlocked)
+
+8. Один из них кладёт трубку:
+   - SIP BYE → Asterisk → Hangup event
+   - consumer.on_hangup ловит ТОЛЬКО когда Uniqueid == Linkedid (panel-channel)
+     └─→ call_ended → cloud → mobile dismisses UI
+```
+
+## 7. Ключевые архитектурные решения
+
+| Что                                                                                | Почему так                                                                                                       |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **TLS только на nginx**                                                            | Self-signed → Let's Encrypt через `dev-api-intercom.docx.kg`. До Asterisk идёт plain `ws`.                       |
+| **`direct_media=no` у WebRTC**                                                     | Asterisk обязан сидеть в media path: панель=plain UDP, мобила=DTLS-SRTP — peer-to-peer не сошлись бы.            |
+| **`rewrite_contact=yes` + `rtp_symmetric=yes`**                                    | Mobile шлёт Contact `sip:*.invalid;transport=ws`. Asterisk подменяет на реальный сокет для re-INVITE/Hangup.     |
+| **`default_expiration=120` + `remove_existing=no` + `qualify_frequency=0`**        | Mobile Doze (60-90s sleep) не должен убивать AOR. Не пингуем OPTIONS — энерго-жор и ложные Unreachable.          |
+| **Линки `set_apartment_monitors` → `_rebuild_all_dialplan`**                       | Cloud — source of truth для маппинга apartment→monitors. Bridge пассивно sync'ает.                               |
+| **`__CALL_ID` channel var**                                                        | Чтобы `re_invite_apartment` и `reject_call` могли найти panel-channel через AMI после long delay.                |
+| **`emit_apartment_upserted` / `emit_device_upserted` с `cloud_synced` durability** | Admin может создать сущность пока cloud offline → флаг в БД → retry на startup.                                  |
+| **`bootstrap_snapshot` от cloud**                                                  | После hello cloud один раз шлёт entrances+devices, bridge кеширует — admin UI знает какие entrance_id допустимы. |
+| **`on_hangup` фильтрует `Uniqueid == Linkedid`**                                   | Иначе CANCEL на cancelled leg в parallel-Dial вызывал бы phantom `call_ended` через 3 сек после answer.          |
+| **`_cmd_reject_call` энумерирует ВСЕ legs в группе**                               | Asterisk не пропагирует CANCEL детям Dial() в early-media — каждую ногу убиваем явно.                            |
+
+## 8. Типичные проблемы и где смотреть
+
+| Симптом                                                            | Корень                                                   | Чем чинить                                                                         |
+| ------------------------------------------------------------------ | -------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Mobile не получает INVITE                                          | Контакт умер между REGISTER и Dial (Doze)                | `re_invite_apartment` fallback срабатывает автоматически                           |
+| `answer_call` ack OK но звонок «провалился»                        | Mobile leg в Dial-группе никогда не создавался           | `_cmd_answer_call` проверяет существование leg'а → `callee_leg_missing` → fallback |
+| `reject_call` ack OK но gate продолжает звонить                    | Asterisk не propagates CANCEL детям Dial() в early-media | Bridge явно Hangup'ит каждый канал по Linkedid                                     |
+| 404 на `?src=panel-N` в WHEP                                       | Device c этим id не имеет `rtsp_enabled=true`            | Включить RTSP у устройства или фронт не должен запрашивать                         |
+| `cloud_synced=false` у apartment/device                            | Нет `entrance_id`, либо cloud отверг (e.g. dup MAC)      | Видно в admin UI как красный bullet с tooltip `last_cloud_sync_error`              |
+| INVITE на mobile падает с `Could not create dialog to invalid URI` | Контакт в AOR удалён, AOR пуст                           | `re_invite_apartment` после REGISTER                                               |
 
 ---
 
-## Стек технологий
+## 9. Установка и эксплуатация
 
-| Компонент     | Технология                                        |
-|---------------|---------------------------------------------------|
-| SIP PBX       | Asterisk (`andrius/asterisk:latest`)              |
-| Видео         | go2rtc (`alexxit/go2rtc:latest`) — RTSP→WebRTC    |
-| STUN          | coturn (`coturn/coturn:latest`) — ICE для WebRTC  |
-| Backend       | Python 3.11, FastAPI, SQLAlchemy async, SQLite    |
-| Frontend      | React 18, TypeScript, Vite, Tailwind CSS, JsSIP   |
-| Реверс прокси | Nginx (HTTPS, WSS proxy, SPA)                     |
-| Авторизация   | JWT (python-jose), bcrypt                         |
-| Контейнеры    | Docker, Docker Compose                            |
+### Требования
 
----
+- Ubuntu 22.04+ или любой Linux с Docker 24+ и Docker Compose v2
+- 2 ГБ ОЗУ, 10 ГБ диска
+- Открытые порты: `80`, `443` (web/WSS), `5060/udp` (SIP), `3478/udp+tcp` (STUN/TURN), `8088` (только в localhost — Asterisk WS)
 
-## Структура проекта
-
-```
-intercome/
-├── docker-compose.yml
-├── .env                            # Настройки (из .env.example)
-├── docker/
-│   ├── asterisk/
-│   │   ├── pjsip.conf              # SIP аккаунты (управляемые блоки + ручные)
-│   │   ├── extensions.conf         # Диалплан (генерируется автоматически из квартир)
-│   │   ├── rtp.conf                # RTP порты 10000–20000
-│   │   ├── http.conf               # WebSocket :8088 для браузера
-│   │   ├── manager.conf            # AMI
-│   │   └── asterisk.conf
-│   ├── go2rtc/
-│   │   └── go2rtc.yaml             # RTSP потоки
-│   ├── nginx/
-│   │   ├── server.crt              # SSL сертификат
-│   │   └── server.key
-│   └── bin/
-│       └── docker                  # docker CLI (x86_64) для reload из backend
-├── backend/
-│   └── app/
-│       ├── api/routes/             # auth, devices, apartments, routing_rules, dashboard
-│       ├── services/
-│       │   ├── sip_service.py      # pjsip.conf + extensions.conf + dialplan reload
-│       │   ├── unlock_service.py
-│       │   ├── connectivity_service.py
-│       │   └── polling_service.py
-│       ├── models/                 # User, Device, Apartment, ApartmentMonitor, RoutingRule
-│       ├── schemas/                # Pydantic схемы
-│       └── core/                   # config, logging, security
-└── frontend/
-    └── src/
-        ├── pages/
-        │   ├── ApartmentsPage.tsx  # Квартиры + мониторы + cloud relay
-        │   ├── DevicesPage.tsx
-        │   ├── RoutingRulesPage.tsx
-        │   ├── DashboardPage.tsx
-        │   └── SettingsPage.tsx
-        ├── components/
-        │   ├── ui/                 # CallBanner, WebRTCPlayer, Button, Modal, Toast…
-        │   └── layout/             # AppLayout (SIP клиент), RequireAuth
-        └── hooks/                  # useAuth, useSIPClient, useCallEvents, useApartments…
-```
-
----
-
-## Быстрый старт (Ubuntu/Linux)
-
-### 1. Клонировать репозиторий
+### Быстрый старт
 
 ```bash
-git clone git@github.com:ManassAsylbek/intercome.git
+git clone <repo> intercome
 cd intercome
+cp backend/.env.example .env
+# отредактируй .env — обязательно укажи свой SERVER_IP, PUBLIC_BRIDGE_HOST и CLOUD_*
+
+docker compose up -d --build
 ```
 
-### 2. Сгенерировать SSL сертификат
+### Ключевые переменные `.env`
+
+| Имя                  | Что значит                                                                                             |
+| -------------------- | ------------------------------------------------------------------------------------------------------ |
+| `SERVER_IP`          | LAN-IP машины, на которой крутится bridge. Используется по умолчанию там где не задано иное.           |
+| `PUBLIC_BRIDGE_HOST` | Адрес, по которому mobile-клиент видит bridge. На LAN-тестах = `SERVER_IP`, в проде — публичный домен. |
+| `SIP_DOMAIN`         | SIP realm для Digest auth. Должен совпадать с `default_realm` в `pjsip.conf`.                          |
+| `CLOUD_WS_URL`       | WS URL облака. Сейчас `wss://dev-api-intercom.docx.kg/api/devices/bridges/ws`.                         |
+| `CLOUD_BRIDGE_TOKEN` | Bearer-токен, выдаваемый облаком после `POST /api/devices/bridges`.                                    |
+| `COTURN_SECRET`      | HMAC-secret для short-lived TURN credentials. Должен совпадать с `--static-auth-secret` у coturn.      |
+| `INTERCOM_STUN_URL`  | URL STUN, отдаваемый мобиле. По умолчанию `stun:${SERVER_IP}:3478`.                                    |
+| `DATABASE_URL`       | Строка подключения Postgres. По умолчанию использует containerized `postgres:5432`.                    |
+
+### Полезные команды
 
 ```bash
-mkdir -p docker/nginx
-openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-  -keyout docker/nginx/server.key \
-  -out docker/nginx/server.crt \
-  -subj "/CN=192.168.50.132"
-```
-
-Замени `192.168.50.132` на IP своего сервера.
-
-### 3. Настроить окружение
-
-```bash
-cp .env.example .env
-nano .env
-```
-
-Обязательные параметры:
-
-```dotenv
-SERVER_IP=192.168.50.132          # IP Ubuntu-сервера
-APP_SECRET_KEY=замените-на-случайную-строку-32-символа
-ADMIN_PASSWORD=ваш-пароль
-ASTERISK_MODE=local               # local | ami | ssh
-```
-
-### 4. Запустить
-
-```bash
-sudo docker compose up -d --build
-```
-
-### 5. Проверить статус
-
-```bash
-sudo docker compose ps
-
-# SIP регистрации
-sudo docker exec intercom-asterisk asterisk -rx "pjsip show contacts"
-```
-
-### 6. Открыть веб-интерфейс
-
-```
-https://192.168.50.132
-```
-
-Браузер покажет предупреждение о самоподписанном сертификате — нажми «Продолжить».
-
-Логин: `admin` / пароль из `.env`
-
----
-
-## Открыть порты (UFW)
-
-```bash
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp            # HTTPS веб-интерфейс
-sudo ufw allow 5060/udp           # SIP (устройства)
-sudo ufw allow 8088/tcp           # Asterisk WebSocket (браузерный SIP)
-sudo ufw allow 3478/udp           # STUN (coturn)
-sudo ufw allow 10000:20000/udp    # RTP аудио/видео
-sudo ufw reload
-```
-
----
-
-## Добавление квартиры
-
-1. **Квартиры** → Добавить квартиру
-2. Указать **Номер** (отображаемое, напр. `42`) и **Код вызова** (SIP-номер, напр. `1042`)
-3. Добавить **Мониторы** — SIP-аккаунты устройств внутри квартиры (`1001`, `1003`,…)
-4. При необходимости включить **Облачную переадресацию** (требует настроенного SIP-транка в `.env`)
-5. Сохранить → `extensions.conf` и dialplan обновятся автоматически
-
-## Добавление устройства (дверь / калитка / шлагбаум)
-
-1. **Устройства** → Добавить → тип "Панель домофона"
-2. Включить **SIP**, указать аккаунт (напр. `1004`) и пароль
-3. Выбрать **Квартиру** к которой будет привязано устройство
-4. Сохранить → кнопка **Применить в Asterisk** создаёт блок в `pjsip.conf`
-5. На самом устройстве прописать: сервер `192.168.50.132`, порт `5060`, аккаунт/пароль, **номер для набора** = код вызова квартиры
-
-Несколько устройств могут звонить на одну квартиру — Asterisk принимает любой вызов на `call_code`.
-
----
-
-## Как работает звонок
-
-```
-1. Нажата кнопка на дверной панели (SIP 1004)
-2. Панель делает INVITE → Asterisk (195.168.50.132:5060) с номером 1042
-3. Asterisk dial: PJSIP/1099 & PJSIP/1001 & PJSIP/1003 & PJSIP/1042@cloud-trunk
-4. Кто первый ответил — говорит, остальным Asterisk шлёт CANCEL
-5. В браузере появляется баннер с live видео (WebRTC через go2rtc)
-6. Нажать "Открыть дверь" → HTTP POST на unlock URL устройства
-```
-
----
-
-## Облачная переадресация
-
-Для переадресации звонков на мобильное приложение через облачный SIP-провайдер:
-
-1. Настроить SIP-транк в `docker/asterisk/pjsip.conf` с именем, напр. `cloud-trunk`
-2. В `.env` добавить:
-   ```dotenv
-   CLOUD_SIP_TRUNK_ENDPOINT=cloud-trunk
-   ```
-3. Для каждой квартиры включить **Облачная переадресация** и указать SIP-аккаунт на транке
-4. `extensions.conf` пересгенерируется автоматически при следующем изменении квартиры (или через кнопку "Синхронизировать dialplan")
-
----
-
-## Отладка
-
-```bash
-# Логи всех контейнеров
-sudo docker compose logs -f
+# Все логи
+docker compose logs -f backend
 
 # Только Asterisk
-sudo docker logs intercom-asterisk -f
+docker logs -f intercom-asterisk
 
-# SIP лог
-sudo docker exec intercom-asterisk asterisk -rx "pjsip set logger on"
+# SIP-трафик (детальный)
+docker exec intercom-asterisk asterisk -rx "pjsip set logger on"
 
-# Статус SIP
-sudo docker exec intercom-asterisk asterisk -rx "pjsip show contacts"
-sudo docker exec intercom-asterisk asterisk -rx "pjsip show endpoints"
+# Текущие SIP-контакты
+docker exec intercom-asterisk asterisk -rx "pjsip show contacts"
 
-# Перезагрузить dialplan
-sudo docker exec intercom-asterisk asterisk -rx "dialplan reload"
-sudo docker exec intercom-asterisk asterisk -rx "module reload res_pjsip.so"
+# Текущий dialplan для апартмента
+docker exec intercom-asterisk asterisk -rx "dialplan show 1003@intercom-apartments"
 
-# Посмотреть текущий диалплан
-sudo docker exec intercom-asterisk asterisk -rx "dialplan show intercom"
+# Перезагрузить dialplan вручную
+docker exec intercom-asterisk asterisk -rx "dialplan reload"
+
+# Перезагрузить PJSIP без рестарта Asterisk
+docker exec intercom-asterisk asterisk -rx "module reload res_pjsip.so"
+
+# Список устройств в БД
+docker exec intercom-postgres psql -U intercom -d intercom -c \
+  "SELECT id, name, device_type, sip_account, entrance_id, cloud_id, cloud_synced FROM devices;"
+
+# Список квартир
+docker exec intercom-postgres psql -U intercom -d intercom -c \
+  "SELECT id, call_code, entrance_id, cloud_id, cloud_synced, last_cloud_sync_error FROM apartments;"
+
+# Кэшированные entrances
+docker exec intercom-postgres psql -U intercom -d intercom -c \
+  "SELECT id, cloud_id, number, building_address FROM entrances;"
 ```
 
-### Браузер не слышит звук / звонок сразу сбрасывается
-
-Самая частая причина — mDNS ICE-кандидаты (`*.local`) в HTTPS браузере. Убедись:
-
-1. Контейнер `coturn` запущен (`docker compose ps`)
-2. Порт `3478/udp` открыт в UFW
-3. Браузер открыт по **HTTPS** (не HTTP)
-
-### Эхо во время разговора
-
-- Используй **наушники** на стороне браузера
-- На дверной панели включи **Echo Cancellation (AEC)**
-- Убавь громкость динамика панели до 60–70%
-
----
-
-## Переменные окружения
-
-| Переменная                    | Описание                                          | По умолчанию     |
-|-------------------------------|---------------------------------------------------|------------------|
-| `SERVER_IP`                   | IP сервера                                        | `192.168.50.132` |
-| `FRONTEND_PORT`               | Порт веб-интерфейса                               | `80`             |
-| `APP_SECRET_KEY`              | Секрет JWT (минимум 32 символа)                   | ⚠️ сменить!      |
-| `ADMIN_USERNAME`              | Логин администратора                              | `admin`          |
-| `ADMIN_PASSWORD`              | Пароль администратора                             | ⚠️ сменить!      |
-| `ASTERISK_MODE`               | `local` / `ami` / `ssh`                           | `local`          |
-| `ASTERISK_RELOAD_CMD`         | Команда перезагрузки Asterisk                     | —                |
-| `ASTERISK_AMI_HOST`           | AMI хост                                          | `asterisk-host`  |
-| `ASTERISK_AMI_PORT`           | AMI порт                                          | `5038`           |
-| `ASTERISK_AMI_USER`           | AMI пользователь                                  | `intercom`       |
-| `ASTERISK_AMI_SECRET`         | AMI пароль                                        | —                |
-| `CLOUD_SIP_TRUNK_ENDPOINT`    | Имя PJSIP endpoint для облачного транка           | —                |
-
-
----
-
-## Что умеет
-
-- 📞 **SIP в браузере** — принять/сбросить звонок с дверной панели прямо в браузере (JsSIP + WebRTC over WSS)
-- 🎥 **Live видео** — WebRTC видеопоток с камеры двери через go2rtc (без плагинов)
-- 🔔 **Одновременный звонок** — звонок с двери идёт сразу на браузер и монитор, кто первый ответил — тот говорит
-- 🔓 **Открытие двери** — кнопка в браузере отправляет HTTP-команду на разблокировку замка
-- 📋 **Управление устройствами** — добавление, редактирование, проверка доступности
-- 🔐 **HTTPS + JWT** — самоподписанный SSL, JWT-аутентификация
-- 📊 **Дашборд** — статус устройств, активные звонки, системная информация
-
----
-
-## Архитектура
-
-```
-[Дверная панель Leelen]  ←── SIP/UDP ──→  [Asterisk PBX]  ←── SIP/UDP ──→  [Монитор Leelen]
-     192.168.50.31                         network_mode:host                  192.168.50.100
-     SIP: 1002                              порт 5060/UDP                     SIP: 1001
-     RTSP: :554                                   │
-                                    ┌─────────────┴──────────────┐
-                                    │       SIP/WS :8088         │
-                                    └─────────────┬──────────────┘
-                                                  │ WSS (через nginx /sip)
-                                         [Браузер — JsSIP 1099]
-                                                  │
-                              ┌───────────────────┼───────────────────┐
-                              │                   │                   │
-                    [Nginx :443 HTTPS]   [Backend FastAPI]    [go2rtc :1984]
-                     SSL termination      :8000 (внутри)      WebRTC видео
-                     /sip → WS proxy      Auth/Devices         RTSP → WebRTC
-                     /go2rtc/ proxy       Unlock/Polling
-                     /api/ proxy          SSE events
-```
-
-> **Важно:** `network_mode: host` (Asterisk и go2rtc) работает только на **Linux**. На macOS Docker Desktop NAT ломает SIP и RTP.
-
----
-
-## Стек технологий
-
-| Компонент     | Технология                                      |
-| ------------- | ----------------------------------------------- |
-| SIP PBX       | Asterisk (`andrius/asterisk:latest`)            |
-| Видео         | go2rtc (`alexxit/go2rtc:latest`) — RTSP→WebRTC  |
-| STUN          | coturn (`coturn/coturn:latest`) — LAN ICE       |
-| Backend       | Python 3.12, FastAPI, SQLAlchemy, SQLite        |
-| Frontend      | React 18, TypeScript, Vite, Tailwind CSS, JsSIP |
-| Реверс прокси | Nginx (HTTPS, WSS proxy)                        |
-| Авторизация   | JWT (python-jose), bcrypt                       |
-| Контейнеры    | Docker, Docker Compose                          |
-
----
-
-## Структура проекта
-
-```
-intercome/
-├── docker-compose.yml          # Оркестрация: asterisk + backend + frontend + go2rtc + coturn
-├── .env.example                # Шаблон настроек окружения
-├── docker/
-│   ├── asterisk/
-│   │   ├── pjsip.conf          # SIP аккаунты (1001 монитор, 1002 дверь, 1099 браузер)
-│   │   ├── extensions.conf     # Диалплан: одновременный звонок на браузер+монитор
-│   │   ├── rtp.conf            # RTP порты (10000–20000), icesupport=yes
-│   │   ├── http.conf           # WebSocket транспорт :8088 для браузера
-│   │   ├── manager.conf        # AMI интерфейс
-│   │   └── asterisk.conf       # Базовые настройки
-│   ├── go2rtc/
-│   │   └── go2rtc.yaml         # RTSP потоки (stream: door → rtsp://192.168.50.31)
-│   └── nginx/
-│       ├── server.crt          # Самоподписанный SSL сертификат
-│       └── server.key          # Приватный ключ
-├── backend/
-│   └── app/
-│       ├── api/routes/         # auth, devices, routing_rules, dashboard, calls
-│       ├── services/           # sip, unlock, rtsp, connectivity, polling, call_store
-│       ├── models/             # SQLAlchemy: User, Device, RoutingRule
-│       ├── schemas/            # Pydantic схемы
-│       └── core/               # config, logging, security (JWT/bcrypt)
-└── frontend/
-    ├── nginx.conf              # HTTPS, /sip WSS proxy, /go2rtc/ proxy, /api/ proxy
-    └── src/
-        ├── pages/              # Dashboard, Devices, DeviceDetail, Login, Routing, Settings
-        ├── components/
-        │   ├── ui/             # CallBanner, WebRTCPlayer, Badge, Button, Modal, Toast
-        │   └── layout/         # AppLayout (SIP клиент), RequireAuth
-        └── hooks/              # useAuth, useSIPClient, useCallEvents, useDevices, ...
-```
-
----
-
-## Быстрый старт (Ubuntu/Linux)
-
-### 1. Клонировать репозиторий
-
-```bash
-git clone git@github.com:ManassAsylbek/intercome.git
-cd intercome
-```
-
-### 2. Сгенерировать SSL сертификат
-
-Браузерный SIP (WebRTC) требует HTTPS. Генерируем самоподписанный сертификат:
-
-```bash
-mkdir -p docker/nginx
-openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-  -keyout docker/nginx/server.key \
-  -out docker/nginx/server.crt \
-  -subj "/CN=192.168.50.132"
-```
-
-Замени `192.168.50.132` на IP своего сервера.
-
-### 3. Настроить окружение
-
-```bash
-cp .env.example .env
-nano .env
-```
-
-Обязательно изменить:
-
-```dotenv
-SERVER_IP=192.168.50.132          # IP вашего Ubuntu-сервера
-APP_SECRET_KEY=замените-на-случайную-строку-32-символа
-ADMIN_PASSWORD=ваш-пароль
-```
-
-### 4. Установить Docker (если не установлен)
-
-```bash
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-newgrp docker
-```
-
-### 5. Запустить
-
-```bash
-docker compose up -d
-```
-
-### 6. Проверить статус
-
-```bash
-docker compose ps
-
-# SIP регистрации — должны быть 1001 (монитор) и 1002 (дверь) со статусом Avail
-sudo docker exec intercom-asterisk asterisk -rx "pjsip show contacts"
-```
-
-### 7. Открыть веб-интерфейс
-
-```
-https://192.168.50.132
-```
-
-Браузер покажет предупреждение о самоподписанном сертификате — нажми «Продолжить».
-
-Логин: `admin` / пароль из `.env`
-
----
-
-## Открыть порты (UFW)
-
-```bash
-sudo ufw allow 80/tcp             # HTTP → редирект на HTTPS
-sudo ufw allow 443/tcp            # HTTPS веб-интерфейс
-sudo ufw allow 5060/udp           # SIP (дверь и монитор)
-sudo ufw allow 8088/tcp           # Asterisk WebSocket (SIP из браузера)
-sudo ufw allow 3478/udp           # STUN (coturn — ICE для WebRTC)
-sudo ufw allow 10000:20000/udp    # RTP аудио/видео
-sudo ufw reload
-```
-
----
-
-## Конфигурация устройств Leelen
-
-| Устройство       | IP               | SIP аккаунт | Пароль           |
-| ---------------- | ---------------- | ----------- | ---------------- |
-| Дверная панель   | `192.168.50.31`  | `1002`      | `StrongPass1002` |
-| Монитор квартиры | `192.168.50.100` | `1001`      | `StrongPass1001` |
-| Браузер          | —                | `1099`      | `BrowserSip1099` |
-
-На устройствах Leelen в SIP-настройках указать:
-
-- **SIP Server**: `192.168.50.132`
-- **Port**: `5060`
-- **Transport**: UDP
-
----
-
-## Как работает звонок
-
-1. Человек нажимает кнопку на **дверной панели** (SIP `1002`)
-2. Панель делает SIP INVITE → **Asterisk** (`192.168.50.132:5060`)
-3. Asterisk видит caller ID `1002` → одновременно звонит на **монитор** (`1001`) и **браузер** (`1099`)
-4. Кто первый ответил — говорит, остальным Asterisk шлёт CANCEL
-5. В браузере появляется баннер с **live видео** с камеры двери (WebRTC через go2rtc)
-6. Пользователь нажимает **Open Door** → HTTP-команда на разблокировку замка
-
----
-
-## Отладка
-
-```bash
-# Логи всех контейнеров
-docker compose logs -f
-
-# Только Asterisk (SIP события)
-sudo docker logs intercom-asterisk -f
-
-# Включить verbose SIP лог
-sudo docker exec intercom-asterisk asterisk -rx "pjsip set logger on"
-
-# Статус SIP регистраций
-sudo docker exec intercom-asterisk asterisk -rx "pjsip show contacts"
-sudo docker exec intercom-asterisk asterisk -rx "pjsip show endpoints"
-
-# Перезагрузить dialplan без перезапуска
-sudo docker exec intercom-asterisk asterisk -rx "dialplan reload"
-sudo docker exec intercom-asterisk asterisk -rx "module reload res_pjsip.so"
-```
-
-### Браузер не слышит звук / звонок сразу сбрасывается
-
-Самая частая причина — браузерный HTTPS генерирует mDNS ICE-кандидаты (`*.local`), которые Asterisk не может разрешить. Убедись что:
-
-1. Контейнер `coturn` запущен (`docker compose ps coturn` — статус Up)
-2. Порт `3478/udp` открыт в UFW
-3. Браузер открыт именно по **HTTPS** (не HTTP)
-
-### Эхо во время разговора
-
-Эхо возникает когда микрофон улавливает звук из динамика. Решения:
-
-- Используй **наушники** на стороне браузера — убирает эхо полностью
-- На дверной панели в веб-интерфейсе найди **Echo Cancellation (AEC)** и включи
-- Убавь громкость динамика на дверной панели до 60–70%
-
-# Перезагрузить конфиг Asterisk без рестарта
-
-docker exec intercom-asterisk asterisk -rx "core reload"
-
-```
-
----
-
-## Переменные окружения
-
-| Переменная         | Описание                         | По умолчанию          |
-| ------------------ | -------------------------------- | --------------------- |
-| `SERVER_IP`        | IP сервера (для CORS и конфигов) | `192.168.50.132`      |
-| `FRONTEND_PORT`    | Порт веб-интерфейса              | `80`                  |
-| `APP_SECRET_KEY`   | Секрет JWT (минимум 32 символа)  | ⚠️ сменить!           |
-| `ADMIN_USERNAME`   | Логин администратора             | `admin`               |
-| `ADMIN_PASSWORD`   | Пароль администратора            | ⚠️ сменить!           |
-| `APP_CORS_ORIGINS` | Разрешённые origins для CORS     | localhost + SERVER_IP |
-| `ASTERISK_MODE`    | `local` или `ssh`                | `local`               |
-```
+### Web-UI
+
+- `https://<SERVER_IP>` — админка (логин из `.env` `ADMIN_USERNAME`/`ADMIN_PASSWORD`)
+- `https://<SERVER_IP>/api/docs` — Swagger
+- `https://<SERVER_IP>/api/redoc` — ReDoc
+
+### Troubleshooting checklist
+
+1. **Bridge не подключается к облаку**: проверь сетевую достижимость `CLOUD_WS_URL` (`curl -I https://dev-api-intercom.docx.kg/`), валидность токена в `.env` или в `/app/data/cloud_bridge_token` (если был `update_bridge_token`).
+2. **Mobile не регистрируется**: проверь что в `pjsip_webrtc.conf` есть нужный `[200xxx]` блок и `pjsip show endpoint 200xxx` показывает `transport-ws`.
+3. **Звонок не доходит до Flutter**: смотри `pjsip show contacts 200xxx` — если пусто, контакт умер в Doze, `re_invite_apartment` должен сработать на следующий answer.
+4. **Видео нет в браузере**: проверь `https://<SERVER_IP>/go2rtc/api/streams` — нужный `panel-{device_id}` должен быть в списке.
+5. **Apartment не уезжает в облако**: смотри `cloud_synced=false` в БД и `last_cloud_sync_error` — обычно `entrance_id` не задан или невалиден.

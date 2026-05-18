@@ -37,7 +37,16 @@ async def _get_apartment(db: AsyncSession, apt_id: int) -> Apartment | None:
 
 
 async def _rebuild_dialplan(db: AsyncSession) -> None:
-    """Regenerate extensions.conf (main) AND extensions_apartments.conf from all enabled apartments."""
+    """Regenerate extensions_apartments.conf (the WebRTC-aware dialplan).
+
+    NOTE: we no longer touch the main ``extensions.conf`` here. That file
+    has a single ``include => intercom-apartments`` line and is otherwise
+    static; the legacy ``generate_extensions_conf`` path would replace it
+    with hardcoded per-apartment routes that bypass our auto-generated
+    intercom-apartments context. Anything that needs to ring on a call —
+    panel hardware, WebRTC monitor, mobile — already lives in
+    ``apartment_monitors`` and flows through ``write_apartments_dialplan``.
+    """
     result = await db.execute(
         select(Apartment)
         .options(selectinload(Apartment.monitors))
@@ -58,9 +67,6 @@ async def _rebuild_dialplan(db: AsyncSession) -> None:
     ]
 
     loop = asyncio.get_event_loop()
-    # Main extensions.conf (legacy webhooks dialplan)
-    await loop.run_in_executor(None, sip_service.generate_extensions_conf, apt_dicts)
-    # WebRTC-aware extensions_apartments.conf (spec section 5)
     await loop.run_in_executor(None, write_apartments_dialplan, apt_dicts)
 
 

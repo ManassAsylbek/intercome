@@ -11,6 +11,7 @@ import type {
   DeviceCreate,
   DeviceListOut,
   DeviceUpdate,
+  Entrance,
   HealthOut,
   LoginRequest,
   RoutingRule,
@@ -110,6 +111,13 @@ export const apartmentsApi = {
     apiClient
       .post<ActionResult>("/apartments/sync-dialplan")
       .then((r) => r.data),
+};
+
+// ─── Entrances (read-only, mirrored from cloud bootstrap_snapshot) ───────────
+
+export const entrancesApi = {
+  list: () =>
+    apiClient.get<Entrance[]>("/entrances").then((r) => r.data),
 };
 
 // ─── Dashboard / System ───────────────────────────────────────────────────────

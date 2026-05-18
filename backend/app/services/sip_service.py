@@ -466,17 +466,20 @@ class SIPService:
         """
         Обновляет (или создаёт) SIP-аккаунт в pjsip.conf и перезагружает Asterisk.
         Режим определяется ASTERISK_MODE в .env: 'local', 'ssh' или 'ami'.
+
+        Раньше здесь дописывался legacy "managed extension" блок в
+        extensions.conf через _apply_extension_to_conf — мы это убрали:
+        дозвоны на номера квартир маршрутизируются через
+        ``[intercom-apartments]`` (auto-generated из apartment_monitors),
+        включаемый одним ``include`` из ``[intercom]``. Legacy-вписывание
+        в extensions.conf затирало этот include и ломало маршрут.
         """
         logger.info("sip_apply_credentials", acct=acct, mode=settings.asterisk_mode)
         if settings.asterisk_mode == "ssh":
-            result = _apply_via_ssh(acct, password)
-        elif settings.asterisk_mode == "ami":
-            result = _apply_local_ami(acct, password)
-        else:
-            result = _apply_local(acct, password)
-        if result.success:
-            _apply_extension_to_conf(acct)
-        return result
+            return _apply_via_ssh(acct, password)
+        if settings.asterisk_mode == "ami":
+            return _apply_local_ami(acct, password)
+        return _apply_local(acct, password)
 
     async def get_peer_status(self, sip_account: str) -> dict:
         return {
@@ -650,7 +653,17 @@ password={password}
 [{ext}]
 type=aor
 max_contacts=5
-remove_existing=yes
+; remove_existing=no: on a reconnect race we want the OLD contact to survive
+; long enough that an incoming Dial can still ring SOMETHING — otherwise the
+; INVITE goes into the void during Doze-induced re-register (~10s window).
+remove_existing=no
+; default_expiration=120: extends contact lifetime so a single 60-90s mobile
+; sleep (Doze, Wi-Fi/LTE switch) doesn't immediately invalidate the AOR.
+default_expiration=120
+; qualify_frequency=0: do NOT poll the WS contact with OPTIONS. Mobile in
+; Doze can't answer those — and a missed OPTIONS marks the contact
+; Unreachable, defeating the longer expiration above.
+qualify_frequency=0
 ; === end webrtc: {ext} ===
 """
 
@@ -806,6 +819,11 @@ async def regenerate_webrtc_conf_from_db() -> None:
 _DIALPLAN_BLOCK_TMPL = """\
 ; === apt: {call_code} ===
 exten => {call_code},1,NoOp(Call to apartment {call_code})
+ ; __CALL_ID / __APARTMENT_CODE are inherited channel variables — they let
+ ; the cloud re_invite_apartment handler find this exact panel channel later
+ ; (e.g. after a mobile Doze wake-up) via AMI Status / Getvar.
+ same => n,Set(__CALL_ID=${{UNIQUEID}})
+ same => n,Set(__APARTMENT_CODE={call_code})
  same => n,Dial({dial_str},30,tT)
  same => n,Hangup()
 ; === end apt: {call_code} ===
@@ -814,6 +832,8 @@ exten => {call_code},1,NoOp(Call to apartment {call_code})
 _DIALPLAN_EMPTY_TMPL = """\
 ; === apt: {call_code} ===
 exten => {call_code},1,NoOp(Call to apartment {call_code} — no monitors)
+ same => n,Set(__CALL_ID=${{UNIQUEID}})
+ same => n,Set(__APARTMENT_CODE={call_code})
  same => n,Hangup()
 ; === end apt: {call_code} ===
 """

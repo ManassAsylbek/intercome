@@ -51,15 +51,16 @@ async def _rebuild_dialplan(db: AsyncSession) -> None:
         if rule.target_sip_account not in rules_by_code[rule.call_code]:
             rules_by_code[rule.call_code].append(rule.target_sip_account)
 
-    # Convert to apartment-style dicts for generate_extensions_conf
+    # Write to extensions_apartments.conf (not the main extensions.conf, which
+    # is now static with a single ``include => intercom-apartments``).
     apt_dicts = [
-        {"call_code": code, "monitors": accounts, "cloud_relay_enabled": False, "cloud_sip_account": None}
+        {"call_code": code, "monitors": accounts}
         for code, accounts in rules_by_code.items()
     ]
 
-    # Run blocking file I/O in thread pool so async loop is not blocked
+    from app.services.sip_service import write_apartments_dialplan
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, sip_service.generate_extensions_conf, apt_dicts)
+    await loop.run_in_executor(None, write_apartments_dialplan, apt_dicts)
 
 
 @router.get("", response_model=RoutingRuleListOut)

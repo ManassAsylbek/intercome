@@ -262,6 +262,7 @@ class CloudBridge:
             "unlock_door": self._cmd_unlock_door,
             "reject_call": self._cmd_reject_call,
             "answer_call": self._cmd_answer_call,
+            "re_invite_apartment": self._cmd_re_invite_apartment,
             "update_bridge_token": self._cmd_update_bridge_token,
             # Cloud → bridge mirror state. No cmd_id, no ack required.
             "bootstrap_snapshot": self._cmd_bootstrap_snapshot,
@@ -1113,10 +1114,20 @@ class CloudBridge:
         return response
 
     async def _cmd_reject_call(self, data: dict, **_) -> dict:
-        """Hang up the panel's channel — propagates CANCEL to all Dial targets.
+        """Hang up EVERY channel in the call group.
 
-        Uses CoreShowChannels to find the actual panel channel name instead of
-        guessing PJSIP/{caller}, since the SIP transport prefix may differ.
+        Previously: we Hangup'd just the originating panel channel and relied
+        on Asterisk's Dial() to auto-CANCEL its outgoing legs. Reality (seen
+        on call_id 1778680452.254): Dial() exits when the parent is hung up,
+        but in some early-media / ringing states the outgoing legs do NOT
+        receive CANCEL — the panel UA stops, but the called endpoints keep
+        ringing until their own dial-timeout. From cloud's perspective the
+        user pressed Reject and the gate keeps shouting.
+
+        Now we enumerate all channels in the call group (matched by
+        ``Linkedid == call_id``) and issue an AMI Hangup against every one.
+        Idempotent: any leg already gone returns harmlessly. We report which
+        channels we touched so cloud can correlate with Asterisk events.
         """
         from app.ami.client import ami_client
 
@@ -1124,47 +1135,312 @@ class CloudBridge:
         if not call_id:
             raise RuntimeError("call_id is required")
 
-        chan = await _find_call_channel(call_id)
-        if not chan:
-            raise RuntimeError(f"Channel for call_id={call_id} not found")
+        # Find ALL channels in the call group.
+        resp = await ami_client.send_action({"Action": "CoreShowChannels"})
+        events = resp if isinstance(resp, list) else [resp] if resp else []
+        chans_to_kill: list[str] = []
+        for ev in events:
+            if not hasattr(ev, "keys"):
+                continue
+            lid = _ami_field(ev, "Linkedid", "LinkedID")
+            uid = _ami_field(ev, "Uniqueid", "UniqueID")
+            if lid != call_id and uid != call_id:
+                continue
+            chan = _ami_field(ev, "Channel")
+            if chan and chan not in chans_to_kill:
+                chans_to_kill.append(chan)
 
-        resp = await ami_client.send_action({
-            "Action": "Hangup",
-            "Channel": chan,
-            "Cause": "21",  # Call rejected
-        })
-        if isinstance(resp, dict) and resp.get("Response") not in ("Success", None):
-            raise RuntimeError(f"AMI Hangup failed: {resp.get('Message')}")
-        logger.info("cloud_reject_call_hangup", call_id=call_id, channel=chan)
-        return {"success": True, "call_id": call_id, "channel": chan}
+        if not chans_to_kill:
+            raise RuntimeError("channel_gone")
+
+        # Hangup each leg explicitly. Partial errors are non-fatal — a leg
+        # already gone is fine, we only fail hard if literally none accepted.
+        hangup_results: list[dict] = []
+        for chan in chans_to_kill:
+            resp = await ami_client.send_action(
+                {
+                    "Action": "Hangup",
+                    "Channel": chan,
+                    "Cause": "21",  # Call rejected (Q.850)
+                }
+            )
+            ok = False
+            msg = ""
+            if isinstance(resp, dict):
+                status = _ami_field(resp, "Response") or ""
+                ok = status == "Success"
+                msg = _ami_field(resp, "Message") or ""
+            elif resp is None:
+                msg = "no AMI response"
+            else:
+                # panoramisk Message object that is dict-like
+                try:
+                    status = _ami_field(resp, "Response") or ""
+                    ok = status == "Success"
+                    msg = _ami_field(resp, "Message") or ""
+                except Exception:
+                    msg = repr(resp)[:100]
+            hangup_results.append({"channel": chan, "ok": ok, "message": msg})
+
+        any_ok = any(r["ok"] for r in hangup_results)
+        if not any_ok:
+            logger.error(
+                "cloud_reject_call_all_hangups_failed",
+                call_id=call_id,
+                results=hangup_results,
+            )
+            raise RuntimeError(
+                "hangup_failed: " + "; ".join(
+                    f"{r['channel']}={r['message']}" for r in hangup_results
+                )
+            )
+
+        logger.info(
+            "cloud_reject_call_dispatched",
+            call_id=call_id,
+            channels=[r["channel"] for r in hangup_results],
+            results=hangup_results,
+        )
+        return {
+            "success": True,
+            "call_id": call_id,
+            "channels": [r["channel"] for r in hangup_results],
+            "hangup_results": hangup_results,
+        }
 
     async def _cmd_answer_call(self, data: dict, **_) -> dict:
         """User answered in the cloud-side mobile/web client.
 
-        Asterisk handles the actual media bridge automatically: it's already
-        Dial()-ing the user's WebRTC endpoint, and the SIP.js client answers
-        with 200 OK → Asterisk auto-bridges. The bridge's job here is only to:
-          1. Verify the call is still active.
-          2. Send call_answered upstream so the cloud cancels notifications
-             on the user's other devices.
-          3. Ack.
+        We verify TWO things before reporting success:
+
+          1. The originating panel channel is still alive (Linkedid match).
+             If not → ``channel_gone`` → cloud falls back to re_invite_apartment.
+          2. A channel for ``answered_by_sip`` exists in the same call group.
+             This catches the Doze-race case where the mobile contact was
+             missing at Dial() time so Asterisk never sent an INVITE to it
+             (we'd see `Could not create dialog to invalid URI '<ext>'` in
+             the Asterisk log). The panel ringback came from the hardware
+             monitor leg, the mobile leg never got created — answering on
+             the mobile UI in this state means "I want audio but there is
+             no SIP session". Returning success here misleads cloud into
+             reporting audio_status=established, mobile waits for an INVITE
+             that will never arrive.
+             If absent → ``callee_leg_missing`` → cloud uses
+             re_invite_apartment to Originate a fresh leg to the mobile.
+
+        Otherwise just send ``call_answered`` upstream (silences the user's
+        other devices) and ack success.
         """
+        from app.ami.client import ami_client
+
         call_id = data.get("call_id")
         answered_by_sip = data.get("answered_by_sip")
         if not call_id:
             raise RuntimeError("call_id is required")
 
-        chan = await _find_call_channel(call_id)
-        if not chan:
-            raise RuntimeError(f"Channel for call_id={call_id} not found")
+        panel_chan = await _find_call_channel(call_id)
+        if not panel_chan:
+            raise RuntimeError("channel_gone")
 
-        # Tell cloud to silence the ring on the user's other devices.
-        await self.send_event("call_answered", {
+        # Hunt for an actual leg matching answered_by_sip in this call group.
+        if answered_by_sip:
+            resp = await ami_client.send_action({"Action": "CoreShowChannels"})
+            events = resp if isinstance(resp, list) else [resp] if resp else []
+            callee_leg_chan: str | None = None
+            for ev in events:
+                if not isinstance(ev, (dict,)) and not hasattr(ev, "keys"):
+                    continue
+                lid = _ami_field(ev, "Linkedid", "LinkedID")
+                if lid != call_id:
+                    continue
+                chan = _ami_field(ev, "Channel") or ""
+                # PJSIP channel names look like "PJSIP/200001-0000abcd". The
+                # extension is the part between "PJSIP/" and the trailing "-…".
+                if not chan.startswith("PJSIP/"):
+                    continue
+                ext = chan.split("/", 1)[1].split("-")[0]
+                if ext == str(answered_by_sip):
+                    callee_leg_chan = chan
+                    break
+
+            if not callee_leg_chan:
+                logger.warning(
+                    "answer_call_callee_leg_missing",
+                    call_id=call_id,
+                    answered_by_sip=answered_by_sip,
+                    panel_chan=panel_chan,
+                )
+                raise RuntimeError("callee_leg_missing")
+
+        await self.send_event(
+            "call_answered",
+            {"call_id": call_id, "answered_by_sip": answered_by_sip},
+        )
+        logger.info(
+            "cloud_answer_call_ack",
+            call_id=call_id,
+            by=answered_by_sip,
+            panel_chan=panel_chan,
+        )
+        return {
+            "success": True,
+            "audio_status": "established",
             "call_id": call_id,
-            "answered_by_sip": answered_by_sip,
-        })
-        logger.info("cloud_answer_call_ack", call_id=call_id, by=answered_by_sip)
-        return {"success": True, "call_id": call_id, "channel": chan}
+            "channel": panel_chan,
+        }
+
+    async def _cmd_re_invite_apartment(self, data: dict, **_) -> dict:
+        """Re-Originate a fresh leg to the callee and bridge it into a
+        still-alive panel channel.
+
+        Used by cloud as a fallback after ``answer_call`` fails because the
+        callee's contact expired during mobile Doze. Flow:
+
+          1. Look up the panel channel by ``call_id`` (Uniqueid/Linkedid).
+          2. Poll AMI for ``PJSIPShowEndpoint`` (or equivalent) until the
+             callee has at least one live contact, up to ``timeout_seconds``.
+          3. Issue AMI ``Originate`` with ``Application=Bridge``,
+             ``Data=<panel_chan>`` — when the callee picks up, Asterisk
+             bridges them into the existing panel call. No new dialplan,
+             no fresh INVITE-from-panel.
+          4. Ack ``{ok: true, result: {audio_status: "established"}}`` on
+             Originate=Success; otherwise structured error.
+
+        Returns shape per cloud spec:
+          ok=true  → result={audio_status: "established", channel: <panel>}
+          ok=false → raise RuntimeError("channel_gone"|"callee_not_registered")
+                     ; cloud's ack handler maps error string to audio_status.
+        """
+        from app.ami.client import ami_client
+
+        call_id = (data or {}).get("call_id")
+        callee = (data or {}).get("callee_sip_extension")
+        timeout_s = float((data or {}).get("timeout_seconds") or 10)
+        if not call_id or not callee:
+            raise RuntimeError("call_id and callee_sip_extension are required")
+
+        # 1) Is the panel channel still alive?
+        panel_chan = await _find_call_channel(call_id)
+        if not panel_chan:
+            logger.warning("re_invite_apartment_panel_gone", call_id=call_id)
+            raise RuntimeError("channel_gone")
+
+        # 2) Poll for the callee's contact. We previously tried
+        #    PJSIPShowEndpoint and parsed ContactStatusDetail events, but
+        #    panoramisk's send_action returns a different shape for some
+        #    EventList actions and that parser was missing real contacts.
+        #
+        #    Switch to AMI Command action with the CLI output — the text
+        #    format ``aor/sip:...:port;transport=ws  <hash>  <Status>`` is
+        #    stable across Asterisk versions, and "any line for our AOR with
+        #    Status != 'Removed'" is a robust readiness check. We collect a
+        #    diagnostic sample on first miss so the next failure is debuggable.
+        async def _has_callee_contact() -> tuple[bool, str]:
+            resp = await ami_client.send_action(
+                {"Action": "Command", "Command": f"pjsip show contacts"}
+            )
+            if not resp:
+                return False, "no AMI response"
+            items = resp if isinstance(resp, list) else [resp]
+            blob = ""
+            for it in items:
+                for key in ("Output", "CmdData", "Response", "Message", "data"):
+                    val = _ami_field(it, key)
+                    if isinstance(val, str) and val:
+                        blob += val + "\n"
+                    elif isinstance(val, list):
+                        blob += "\n".join(str(x) for x in val) + "\n"
+            if not blob:
+                # panoramisk may merge CLI output across many lines/events as
+                # separate dict entries — flatten everything stringy.
+                try:
+                    blob = "\n".join(
+                        "\n".join(str(v) for v in dict(it).values() if isinstance(v, str))
+                        for it in items
+                    )
+                except Exception:
+                    blob = ""
+            for line in blob.splitlines():
+                if "Contact:" not in line:
+                    continue
+                # Lines look like:
+                #   Contact:  200001/sip:abc@host:port;transport=ws ... <Status>
+                if f" {callee}/sip:" not in line and f"{callee}/sip:" not in line:
+                    continue
+                lower = line.lower()
+                if "removed" in lower or "unreach" in lower:
+                    continue
+                return True, line.strip()
+            return False, blob[:400] if blob else "no output"
+
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        last_diag = ""
+        while True:
+            ok, diag = await _has_callee_contact()
+            if ok:
+                logger.info(
+                    "re_invite_apartment_contact_seen",
+                    call_id=call_id,
+                    callee=callee,
+                    contact=diag,
+                )
+                break
+            last_diag = diag
+            if asyncio.get_event_loop().time() >= deadline:
+                logger.warning(
+                    "re_invite_apartment_callee_not_registered",
+                    call_id=call_id,
+                    callee=callee,
+                    waited_s=timeout_s,
+                    last_probe_output=last_diag,
+                )
+                raise RuntimeError("callee_not_registered")
+            await asyncio.sleep(0.5)
+
+        # 3) Originate the new leg, bridging into the panel's existing channel
+        #    on answer. Async=true so we don't block on the dial timeout —
+        #    Asterisk will fire OriginateResponse when it has news.
+        action_id = f"reinvite-{call_id}-{int(time.time() * 1000)}"
+        resp = await ami_client.send_action(
+            {
+                "Action": "Originate",
+                "ActionID": action_id,
+                "Channel": f"PJSIP/{callee}",
+                "Application": "Bridge",
+                "Data": panel_chan,
+                "CallerID": f"reinvite <{callee}>",
+                "Async": "true",
+                "Timeout": str(int(timeout_s * 1000)),
+            }
+        )
+        # Originate Async returns Response: Success immediately if accepted.
+        # OriginateResponse arrives later — we don't block on it here; cloud
+        # will infer failure via subsequent call_ended event if dial fails.
+        if isinstance(resp, dict):
+            ok = (resp.get("Response") or resp.get("response")) == "Success"
+            msg = resp.get("Message") or resp.get("message") or ""
+            if not ok:
+                logger.error(
+                    "re_invite_apartment_originate_failed",
+                    call_id=call_id,
+                    callee=callee,
+                    detail=msg,
+                )
+                raise RuntimeError(f"originate_failed: {msg}")
+
+        logger.info(
+            "re_invite_apartment_dispatched",
+            call_id=call_id,
+            callee=callee,
+            panel_chan=panel_chan,
+            action_id=action_id,
+        )
+        return {
+            "success": True,
+            "audio_status": "established",
+            "channel": panel_chan,
+            "callee": callee,
+        }
 
     # ──────────────────────────────────────────────────────────────────────────
     # Snapshot helpers

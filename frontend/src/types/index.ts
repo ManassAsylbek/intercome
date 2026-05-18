@@ -54,6 +54,14 @@ export interface Device {
   web_port: number | null;
   enabled: boolean;
   notes: string | null;
+  // Cloud mirror
+  mac_address: string | null;
+  model: string | null;
+  entrance_id: number | null;
+  cloud_id: number | null;
+  cloud_synced: boolean;
+  last_cloud_sync_error: string | null;
+  // SIP
   sip_enabled: boolean;
   sip_account: string | null;
   sip_password: string | null;
@@ -76,8 +84,18 @@ export interface Device {
 
 export type DeviceCreate = Omit<
   Device,
-  "id" | "is_online" | "last_seen" | "created_at" | "updated_at"
->;
+  | "id"
+  | "cloud_id"
+  | "cloud_synced"
+  | "last_cloud_sync_error"
+  | "is_online"
+  | "last_seen"
+  | "created_at"
+  | "updated_at"
+> & {
+  // entrance_id is required on create (backend validates 422 otherwise).
+  entrance_id: number;
+};
 export type DeviceUpdate = Partial<DeviceCreate>;
 
 export interface DeviceListOut {
@@ -189,11 +207,26 @@ export interface ApartmentMonitor {
   id: number;
   sip_account: string;
   label: string | null;
+  mac_address: string | null;
+  model: string | null;
+  name: string | null;
+  cloud_id: number | null;
 }
 
 export interface ApartmentMonitorIn {
   sip_account: string;
-  label: string | null;
+  label?: string | null;
+  mac_address?: string | null;
+  model?: string | null;
+  name?: string | null;
+}
+
+export interface Entrance {
+  id: number;
+  cloud_id: number;
+  number: string;
+  building_id: number | null;
+  building_address: string | null;
 }
 
 export interface ApartmentSourceDevice {
@@ -210,6 +243,11 @@ export interface Apartment {
   call_code: string;
   notes: string | null;
   enabled: boolean;
+  floor: number | null;
+  entrance_id: number | null;
+  cloud_id: number | null;
+  cloud_synced: boolean;
+  last_cloud_sync_error: string | null;
   cloud_relay_enabled: boolean;
   cloud_sip_account: string | null;
   monitors: ApartmentMonitor[];
@@ -223,6 +261,9 @@ export interface ApartmentCreate {
   call_code: string;
   notes?: string | null;
   enabled: boolean;
+  floor?: number | null;
+  // Required by backend — pick from GET /api/entrances.
+  entrance_id: number;
   cloud_relay_enabled: boolean;
   cloud_sip_account?: string | null;
   monitors: ApartmentMonitorIn[];

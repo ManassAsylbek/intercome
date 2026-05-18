@@ -20,7 +20,14 @@ import { Plus, Pencil, Trash2, GitFork } from "lucide-react";
 
 const schema = z.object({
   name: z.string().min(1, "Name is required"),
-  call_code: z.string().min(1, "Call code is required"),
+  // call_code это SIP extension — должен быть только цифрами (1001, 200001).
+  // SIP технически допускает alphanumeric, но в нашей системе все коды
+  // числовые, а буквы в этом поле почти всегда означают опечатку.
+  call_code: z
+    .string()
+    .min(1, "Код вызова обязателен")
+    .max(16, "Слишком длинный код")
+    .regex(/^\d+$/, "Только цифры (например 1001)"),
   source_device_id: z.coerce.number().nullable().optional(),
   target_device_id: z.coerce.number().nullable().optional(),
   target_sip_account: z.string().nullable().optional(),
@@ -63,6 +70,31 @@ function RuleFormModal({
         }
       : { enabled: true, priority: 0 },
   });
+
+  // useForm's defaultValues only initialise on first mount. Closing the modal
+  // doesn't remount the form, so values persist into the next open. Reset
+  // explicitly whenever the modal opens (or the row being edited changes).
+  useEffect(() => {
+    if (!open) return;
+    if (rule) {
+      reset({
+        ...rule,
+        source_device_id: rule.source_device_id ?? undefined,
+        target_device_id: rule.target_device_id ?? undefined,
+      });
+    } else {
+      reset({
+        name: "",
+        call_code: "",
+        source_device_id: undefined,
+        target_device_id: undefined,
+        target_sip_account: "",
+        enabled: true,
+        priority: 0,
+        notes: "",
+      });
+    }
+  }, [open, rule, reset]);
 
   const watchedTargetDeviceId = useWatch({ control, name: "target_device_id" });
 
@@ -113,7 +145,9 @@ function RuleFormModal({
         <Input
           label="Код вызова"
           placeholder="1001"
-          hint="Номер экстеншна, который набирает устройство-источник (например дверная панель)"
+          hint="Только цифры. Номер экстеншна, который набирает устройство-источник (например дверная панель)."
+          inputMode="numeric"
+          pattern="[0-9]*"
           {...register("call_code")}
           error={errors.call_code?.message}
         />

@@ -48,11 +48,18 @@ class DeviceBase(BaseModel):
 
     # Cloud mirror inputs (admin enters MAC, picks an entrance from
     # /api/entrances). Cloud-side IDs come back via ack and live in DeviceOut.
-    # entrance_id is required for the same reason as on ApartmentCreate.
+    #
+    # NOTE: entrance_id is Optional in *Base* so that DeviceOut (which inherits
+    # from DeviceBase via SQLAlchemy rows) can serialise legacy devices that
+    # were created before we added entrance support — they have entrance_id=
+    # NULL in the DB and would otherwise blow up `GET /api/devices` with a
+    # pydantic ValidationError. The requirement is re-imposed on
+    # DeviceCreate so admins must still pick an entrance when adding a new
+    # device through the UI.
     mac_address: Optional[str] = Field(None, max_length=32)
     model: Optional[str] = Field(None, max_length=128)
-    entrance_id: int = Field(
-        ...,
+    entrance_id: Optional[int] = Field(
+        None,
         description="Local FK to entrances.id. List via GET /api/entrances.",
     )
 
@@ -80,7 +87,12 @@ class DeviceBase(BaseModel):
 
 
 class DeviceCreate(DeviceBase):
-    pass
+    # Re-impose entrance_id as required: admin MUST pick one when creating a
+    # new device, otherwise it can't be mirrored to cloud.
+    entrance_id: int = Field(
+        ...,
+        description="Local FK to entrances.id. List via GET /api/entrances.",
+    )
 
 
 class DeviceUpdate(BaseModel):

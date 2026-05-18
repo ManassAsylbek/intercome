@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/FormFields";
 import { useCreateDevice, useUpdateDevice } from "@/hooks/useDevices";
 import { useApartments } from "@/hooks/useApartments";
+import { useEntrances } from "@/hooks/useEntrances";
 import { toast } from "@/components/ui/Toast";
 import { devicesApi } from "@/api";
 import type { Device } from "@/types";
@@ -30,6 +31,10 @@ const schema = z.object({
   web_port: z.coerce.number().int().min(1).max(65535).nullable().optional(),
   enabled: z.boolean(),
   notes: z.string().nullable().optional(),
+  // Cloud mirror — backend requires entrance_id on POST /api/devices.
+  entrance_id: z.coerce.number().int().positive("Подъезд обязателен"),
+  mac_address: z.string().nullable().optional(),
+  model: z.string().nullable().optional(),
   // SIP
   sip_enabled: z.boolean(),
 
@@ -65,6 +70,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
   const update = useUpdateDevice(device?.id ?? 0);
   const { data: apartmentsData } = useApartments();
   const apartments = apartmentsData?.items ?? [];
+  const { data: entrances, isLoading: entrancesLoading } = useEntrances();
   const [sipApplying, setSipApplying] = useState(false);
   const [sipApplyResult, setSipApplyResult] = useState<{
     success: boolean;
@@ -219,9 +225,9 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
             >
               <option value="door_station">Панель домофона</option>
               <option value="home_station">Домашний монитор</option>
-              <option value="guard_station">Пост охраны</option>
+              {/* <option value="guard_station">Пост охраны</option>
               <option value="sip_client">SIP-клиент</option>
-              <option value="camera">Камера</option>
+              <option value="camera">Камера</option> */}
             </Select>
             <div className="flex flex-col gap-1">
               <label className="text-sm font-medium text-gray-700">
@@ -253,6 +259,39 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
               placeholder="8000"
               {...register("web_port")}
               error={errors.web_port?.message}
+            />
+            <div className="col-span-2">
+              <Select
+                label="Подъезд"
+                hint={
+                  entrancesLoading
+                    ? "Загрузка списка подъездов…"
+                    : entrances && entrances.length === 0
+                      ? "Подъезды появятся после подключения к облаку"
+                      : "Список приходит из облака (bootstrap_snapshot). Обязательное поле."
+                }
+                {...register("entrance_id")}
+                error={errors.entrance_id?.message}
+              >
+                <option value="">— выберите подъезд —</option>
+                {entrances?.map((e) => (
+                  <option key={e.id} value={e.id}>
+                    Подъезд {e.number}
+                    {e.building_address ? ` · ${e.building_address}` : ""}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <Input
+              label="MAC-адрес"
+              placeholder="AA:BB:CC:DD:EE:FF"
+              hint="Используется как natural key при синхронизации с облаком"
+              {...register("mac_address")}
+            />
+            <Input
+              label="Модель"
+              placeholder="Hikvision DS-KD8003"
+              {...register("model")}
             />
             <div className="col-span-2">
               <Select
