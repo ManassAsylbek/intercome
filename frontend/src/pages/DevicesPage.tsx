@@ -14,9 +14,9 @@ const DEVICE_TYPES: { value: string; label: string }[] = [
   { value: "", label: "Все типы" },
   { value: "door_station", label: "Панель домофона" },
   { value: "home_station", label: "Домашний монитор" },
-  { value: "guard_station", label: "Пост охраны" },
-  { value: "sip_client", label: "SIP-клиент" },
-  { value: "camera", label: "Камера" },
+  // { value: "guard_station", label: "Пост охраны" },
+  // { value: "sip_client", label: "SIP-клиент" },
+  // { value: "camera", label: "Камера" },
 ];
 
 const TYPE_BADGE: Record<
