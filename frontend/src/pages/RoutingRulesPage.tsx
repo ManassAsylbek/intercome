@@ -62,6 +62,8 @@ function RuleFormModal({
   } = useForm<FormData>({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     resolver: zodResolver(schema) as any,
+    mode: "onBlur",
+    reValidateMode: "onChange",
     defaultValues: rule
       ? {
           ...rule,

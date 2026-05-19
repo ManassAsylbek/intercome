@@ -18,43 +18,199 @@ import { toast } from "@/components/ui/Toast";
 import { devicesApi } from "@/api";
 import type { Device } from "@/types";
 
-const schema = z.object({
-  name: z.string().min(1, "Name is required"),
-  device_type: z.enum([
-    "door_station",
-    "home_station",
-    "guard_station",
-    "sip_client",
-    "camera",
-  ]),
-  ip_address: z.string().nullable().optional(),
-  web_port: z.coerce.number().int().min(1).max(65535).nullable().optional(),
-  enabled: z.boolean(),
-  notes: z.string().nullable().optional(),
-  // Cloud mirror — backend requires entrance_id on POST /api/devices.
-  entrance_id: z.coerce.number().int().positive("Подъезд обязателен"),
-  mac_address: z.string().nullable().optional(),
-  model: z.string().nullable().optional(),
-  // SIP
-  sip_enabled: z.boolean(),
+// ─── Validation helpers ──────────────────────────────────────────────────────
 
-  sip_account: z.string().nullable().optional(),
-  sip_password: z.string().nullable().optional(),
-  sip_server: z.string().nullable().optional(),
-  sip_port: z.coerce.number().int().min(1).max(65535).nullable().optional(),
-  sip_proxy: z.string().nullable().optional(),
-  // RTSP
-  rtsp_enabled: z.boolean(),
-  rtsp_url: z.string().nullable().optional(),
-  // Unlock
-  unlock_enabled: z.boolean(),
-  unlock_method: z.enum(["http_get", "http_post", "sip_dtmf", "none"]),
+const opt = (s: string | null | undefined) =>
+  s == null || s === "" ? undefined : s;
 
-  unlock_url: z.string().nullable().optional(),
-  unlock_username: z.string().nullable().optional(),
-  unlock_password: z.string().nullable().optional(),
-  apartment_id: z.coerce.number().nullable().optional(),
-});
+const IPV4_RE =
+  /^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+const MAC_RE = /^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$/;
+const SIP_USER_RE = /^[A-Za-z0-9._-]{1,128}$/;
+const HOST_RE = /^[A-Za-z0-9.\-_]{1,255}$/;
+
+const optionalIp = z
+  .string()
+  .optional()
+  .nullable()
+  .transform(opt)
+  .refine((v) => v === undefined || IPV4_RE.test(v), {
+    message: "Введите корректный IPv4 (например 192.168.1.42)",
+  });
+
+const optionalPort = z
+  .preprocess(
+    (v) => (v === "" || v === null || v === undefined ? undefined : Number(v)),
+    z
+      .number({ message: "Только целое число" })
+      .int("Только целое число")
+      .min(1, "Порт от 1 до 65535")
+      .max(65535, "Порт от 1 до 65535"),
+  )
+  .optional();
+
+const optionalMac = z
+  .string()
+  .optional()
+  .nullable()
+  .transform(opt)
+  .refine((v) => v === undefined || MAC_RE.test(v), {
+    message: "Формат MAC: AA:BB:CC:DD:EE:FF (шесть пар HEX через :)",
+  });
+
+const optionalProtoUrl = (proto: "http" | "rtsp") =>
+  z
+    .string()
+    .optional()
+    .nullable()
+    .transform(opt)
+    .refine(
+      (v) => {
+        if (v === undefined) return true;
+        try {
+          const u = new URL(v);
+          if (proto === "rtsp") return u.protocol === "rtsp:";
+          return u.protocol === "http:" || u.protocol === "https:";
+        } catch {
+          return false;
+        }
+      },
+      {
+        message:
+          proto === "rtsp"
+            ? "URL должен начинаться с rtsp:// (rtsp://user:pass@host:554/h264)"
+            : "URL должен начинаться с http:// или https://",
+      },
+    );
+
+const schema = z
+  .object({
+    name: z
+      .string()
+      .min(1, "Название обязательно")
+      .max(128, "Не более 128 символов"),
+    device_type: z.enum([
+      "door_station",
+      "home_station",
+      "guard_station",
+      "sip_client",
+      "camera",
+    ]),
+    ip_address: optionalIp,
+    web_port: optionalPort,
+    enabled: z.boolean(),
+    notes: z
+      .string()
+      .max(1000, "Не более 1000 символов")
+      .nullable()
+      .optional(),
+    // Cloud mirror — backend requires entrance_id on POST /api/devices.
+    entrance_id: z.coerce.number().int().positive("Подъезд обязателен"),
+    mac_address: optionalMac,
+    model: z
+      .string()
+      .max(128, "Не более 128 символов")
+      .nullable()
+      .optional(),
+    // SIP
+    sip_enabled: z.boolean(),
+    sip_account: z
+      .string()
+      .optional()
+      .nullable()
+      .transform(opt)
+      .refine((v) => v === undefined || SIP_USER_RE.test(v), {
+        message:
+          "Только буквы, цифры, . _ - (1–128 символов). Пример: 1001 или mobile-john",
+      }),
+    sip_password: z
+      .string()
+      .optional()
+      .nullable()
+      .transform(opt)
+      .refine((v) => v === undefined || (v.length >= 6 && v.length <= 128), {
+        message: "От 6 до 128 символов",
+      }),
+    sip_server: z
+      .string()
+      .optional()
+      .nullable()
+      .transform(opt)
+      .refine((v) => v === undefined || HOST_RE.test(v), {
+        message: "Хост или IP без пробелов",
+      }),
+    sip_port: optionalPort,
+    sip_proxy: z
+      .string()
+      .optional()
+      .nullable()
+      .transform(opt)
+      .refine((v) => v === undefined || HOST_RE.test(v), {
+        message: "Хост или IP",
+      }),
+    // RTSP
+    rtsp_enabled: z.boolean(),
+    rtsp_url: optionalProtoUrl("rtsp"),
+    // Unlock
+    unlock_enabled: z.boolean(),
+    unlock_method: z.enum(["http_get", "http_post", "sip_dtmf", "none"]),
+    unlock_url: optionalProtoUrl("http"),
+    unlock_username: z
+      .string()
+      .max(128, "Не более 128 символов")
+      .nullable()
+      .optional(),
+    unlock_password: z
+      .string()
+      .max(128, "Не более 128 символов")
+      .nullable()
+      .optional(),
+    apartment_id: z.coerce.number().nullable().optional(),
+  })
+  // ── Cross-field requirements: required-when-enabled ──────────────────────
+  .superRefine((data, ctx) => {
+    if (data.sip_enabled) {
+      if (!data.sip_account) {
+        ctx.addIssue({
+          path: ["sip_account"],
+          code: z.ZodIssueCode.custom,
+          message: "Обязательно при включённом SIP",
+        });
+      }
+      if (!data.sip_password) {
+        ctx.addIssue({
+          path: ["sip_password"],
+          code: z.ZodIssueCode.custom,
+          message: "Обязательно при включённом SIP",
+        });
+      }
+    }
+    if (data.rtsp_enabled && !data.rtsp_url) {
+      ctx.addIssue({
+        path: ["rtsp_url"],
+        code: z.ZodIssueCode.custom,
+        message: "Обязательно при включённом RTSP",
+      });
+    }
+    if (data.unlock_enabled) {
+      const httpMethod =
+        data.unlock_method === "http_get" || data.unlock_method === "http_post";
+      if (httpMethod && !data.unlock_url) {
+        ctx.addIssue({
+          path: ["unlock_url"],
+          code: z.ZodIssueCode.custom,
+          message: "URL обязателен для HTTP-метода",
+        });
+      }
+      if (data.unlock_method === "none") {
+        ctx.addIssue({
+          path: ["unlock_method"],
+          code: z.ZodIssueCode.custom,
+          message: "Выберите метод (HTTP GET/POST или SIP DTMF)",
+        });
+      }
+    }
+  });
 
 type FormData = z.infer<typeof schema>;
 
@@ -91,6 +247,13 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
   } = useForm<FormData>({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     resolver: zodResolver(schema) as any,
+    // Show validation errors as soon as a field loses focus, and re-validate
+    // on every change once an error has been surfaced. Default ("onSubmit")
+    // hides issues until the user clicks Save, which feels broken on a long
+    // form like this one — admin enters bad data, clicks elsewhere, sees no
+    // feedback, then is surprised by a wall of errors at submit.
+    mode: "onBlur",
+    reValidateMode: "onChange",
     defaultValues: {
       device_type: "door_station",
       enabled: true,
@@ -170,8 +333,39 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
       }
 
       onClose();
-    } catch {
-      toast("Failed to save device", "error");
+    } catch (err: unknown) {
+      // Surface the actual backend reason instead of a generic message.
+      // Pydantic 422 returns {detail: [{loc, msg, type}, ...]}; HTTPException
+      // returns {detail: "string"}. Axios wraps both into err.response.data.
+      type ApiErr = {
+        response?: {
+          data?: {
+            detail?:
+              | string
+              | { loc?: (string | number)[]; msg?: string }[];
+          };
+        };
+        message?: string;
+      };
+      const e = err as ApiErr;
+      const detail = e.response?.data?.detail;
+      let msg = "Не удалось сохранить устройство";
+      if (typeof detail === "string") {
+        msg = detail;
+      } else if (Array.isArray(detail) && detail.length) {
+        msg = detail
+          .map((d) => {
+            const field = Array.isArray(d.loc)
+              ? d.loc.filter((p) => p !== "body").join(".")
+              : "";
+            return field ? `${field}: ${d.msg}` : d.msg ?? "";
+          })
+          .filter(Boolean)
+          .join("; ");
+      } else if (e.message) {
+        msg = e.message;
+      }
+      toast(msg, "error");
     }
   };
 
@@ -295,11 +489,13 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
               placeholder="AA:BB:CC:DD:EE:FF"
               hint="Используется как natural key при синхронизации с облаком"
               {...register("mac_address")}
+              error={errors.mac_address?.message}
             />
             <Input
               label="Модель"
               placeholder="Hikvision DS-KD8003"
               {...register("model")}
+              error={errors.model?.message}
             />
             <div className="col-span-2">
               <Select
@@ -320,6 +516,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
                 label="Примечания"
                 placeholder="Необязательно…"
                 {...register("notes")}
+                error={errors.notes?.message}
               />
             </div>
           </div>
@@ -351,28 +548,33 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
                 label="SIP-аккаунт"
                 placeholder="1001"
                 {...register("sip_account")}
+                error={errors.sip_account?.message}
               />
               <PasswordInput
                 label="SIP-пароль"
                 placeholder="••••••"
                 {...register("sip_password")}
+                error={errors.sip_password?.message}
               />
               <Input
                 label="SIP-сервер"
                 placeholder="192.168.50.132"
                 {...register("sip_server")}
+                error={errors.sip_server?.message}
               />
               <Input
                 label="SIP-порт"
                 type="number"
                 placeholder="5060"
                 {...register("sip_port")}
+                error={errors.sip_port?.message}
               />
               <div className="col-span-2">
                 <Input
                   label="SIP-прокси"
                   placeholder="Необязательно"
                   {...register("sip_proxy")}
+                  error={errors.sip_proxy?.message}
                 />
               </div>
               {isEdit && (
@@ -435,6 +637,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
               label="RTSP адрес"
               placeholder="rtsp://admin:password@192.168.31.31:554/h264"
               {...register("rtsp_url")}
+              error={errors.rtsp_url?.message}
             />
           )}
         </section>
@@ -461,7 +664,11 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
           </div>
           {unlockEnabled && (
             <div className="grid grid-cols-2 gap-4">
-              <Select label="Метод открытия" {...register("unlock_method")}>
+              <Select
+                label="Метод открытия"
+                {...register("unlock_method")}
+                error={errors.unlock_method?.message}
+              >
                 <option value="http_get">HTTP GET</option>
                 <option value="http_post">HTTP POST</option>
                 <option value="sip_dtmf">SIP DTMF</option>
@@ -471,16 +678,19 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
                 label="URL открытия"
                 placeholder="http://192.168.31.31:8000/unlock"
                 {...register("unlock_url")}
+                error={errors.unlock_url?.message}
               />
               <Input
                 label="Пользователь"
                 placeholder="admin"
                 {...register("unlock_username")}
+                error={errors.unlock_username?.message}
               />
               <PasswordInput
                 label="Пароль"
                 placeholder="123456"
                 {...register("unlock_password")}
+                error={errors.unlock_password?.message}
               />
             </div>
           )}
