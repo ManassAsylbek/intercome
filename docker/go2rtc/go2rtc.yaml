@@ -1,4 +1,6 @@
 streams:
+  panel-23:
+    - rtsp://admin:12345@192.168.1.64:554/ISAPI/Streaming/Channels/101#timeout=10000
   panel-2:
     - rtsp://admin:123456@192.168.31.43:554/h264#timeout=10000
 

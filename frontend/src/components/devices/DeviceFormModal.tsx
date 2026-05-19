@@ -70,7 +70,11 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
   const update = useUpdateDevice(device?.id ?? 0);
   const { data: apartmentsData } = useApartments();
   const apartments = apartmentsData?.items ?? [];
-  const { data: entrances, isLoading: entrancesLoading } = useEntrances();
+  const {
+    data: entrances,
+    isLoading: entrancesLoading,
+    refetch: refetchEntrances,
+  } = useEntrances();
   const [sipApplying, setSipApplying] = useState(false);
   const [sipApplyResult, setSipApplyResult] = useState<{
     success: boolean;
@@ -102,6 +106,10 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
   const unlockEnabled = watch("unlock_enabled");
 
   useEffect(() => {
+    if (!open) return;
+    // Pull a fresh entrances list so a newly created one shows up in the
+    // dropdown without requiring a hard page reload.
+    refetchEntrances();
     if (device) {
       reset({
         ...device,
@@ -118,7 +126,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
         unlock_method: "none",
       });
     }
-  }, [device, reset, open]);
+  }, [device, reset, open, refetchEntrances]);
 
   const onSubmit = async (data: FormData) => {
     try {

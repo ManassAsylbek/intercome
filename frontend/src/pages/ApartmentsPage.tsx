@@ -68,7 +68,11 @@ function ApartmentFormModal({
   const isEdit = !!apartment;
   const create = useCreateApartment();
   const update = useUpdateApartment(apartment?.id ?? 0);
-  const { data: entrances, isLoading: entrancesLoading } = useEntrances();
+  const {
+    data: entrances,
+    isLoading: entrancesLoading,
+    refetch: refetchEntrances,
+  } = useEntrances();
 
   const {
     register,
@@ -108,8 +112,11 @@ function ApartmentFormModal({
   // useForm's defaultValues only initialise on first mount. Closing the modal
   // does not remount the form, so stale values persist on the next open.
   // Reset explicitly when the modal opens (or the row being edited changes).
+  // Also force-refetch entrances so a freshly created one (pushed by cloud
+  // via bootstrap_snapshot) appears in the dropdown without a hard reload.
   useEffect(() => {
     if (!open) return;
+    refetchEntrances();
     if (apartment) {
       reset({
         number: apartment.number,
