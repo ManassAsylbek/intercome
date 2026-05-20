@@ -85,6 +85,19 @@ class DeviceBase(BaseModel):
     # Apartment link (for source devices: door panels, gates, barriers)
     apartment_id: Optional[int] = None
 
+    @field_validator("apartment_id", mode="before")
+    @classmethod
+    def _blank_apartment_to_none(cls, v: object) -> object:
+        """Treat 0 / "" (UI "no apartment" sentinel) as NULL.
+
+        The device form's empty <Select> option submits "" which the client
+        coerces to 0; 0 is not a real apartments.id, so without this the
+        INSERT fails a FK constraint and surfaces as a raw 500.
+        """
+        if v in (0, "0", ""):
+            return None
+        return v
+
 
 class DeviceCreate(DeviceBase):
     # Re-impose entrance_id as required: admin MUST pick one when creating a
@@ -119,6 +132,14 @@ class DeviceUpdate(BaseModel):
     unlock_username: Optional[str] = None
     unlock_password: Optional[str] = None
     apartment_id: Optional[int] = None
+
+    @field_validator("apartment_id", mode="before")
+    @classmethod
+    def _blank_apartment_to_none(cls, v: object) -> object:
+        """See DeviceBase._blank_apartment_to_none — same 0/"" → NULL guard."""
+        if v in (0, "0", ""):
+            return None
+        return v
 
 
 class DeviceOut(DeviceBase):

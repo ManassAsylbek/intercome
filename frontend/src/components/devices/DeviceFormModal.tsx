@@ -165,7 +165,13 @@ const schema = z
       .max(128, "Не более 128 символов")
       .nullable()
       .optional(),
-    apartment_id: z.coerce.number().nullable().optional(),
+    // Empty <Select> option submits "" — coerce that (and undefined) to null
+    // rather than letting z.coerce.number() turn it into 0, which the backend
+    // rejects with a FK violation (no apartments.id = 0).
+    apartment_id: z.preprocess(
+      (v) => (v === "" || v == null ? null : v),
+      z.coerce.number().int().positive().nullable(),
+    ),
   })
   // ── Cross-field requirements: required-when-enabled ──────────────────────
   .superRefine((data, ctx) => {
