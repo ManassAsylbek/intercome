@@ -46,6 +46,12 @@ async def create_device(
     current_user: User = Depends(get_current_user),
 ):
     device = await device_service.create_device(db, payload, actor=current_user.username)
+    # Commit before mirroring: emit_device_upserted opens its own session and
+    # writes devices.cloud_synced — if the request transaction is still open
+    # it holds a row lock on this device and the two sessions self-deadlock.
+    # Committing first also makes the row visible so the device actually
+    # mirrors to cloud on creation (otherwise emit sees no row).
+    await db.commit()
     from app.cloud.bridge import cloud_bridge
     await cloud_bridge.emit_device_upserted(device.id)
     return device
@@ -74,6 +80,9 @@ async def update_device(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     device = await device_service.update_device(db, device, payload, actor=current_user.username)
+    # Commit before mirroring — see create_device: emit opens a second session
+    # and updating the same still-locked device row would self-deadlock.
+    await db.commit()
     from app.cloud.bridge import cloud_bridge
     await cloud_bridge.emit_device_upserted(device.id)
     return device
