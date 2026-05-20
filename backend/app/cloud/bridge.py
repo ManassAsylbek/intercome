@@ -346,10 +346,14 @@ class CloudBridge:
         Orphan devices (cloud has them, we don't) are logged but NOT auto-
         created — bridge admin must register them locally first. Orphan
         entrances ARE inserted: they're cloud-defined.
+
+        Stale entrances (we have them, cloud doesn't) ARE deleted — the
+        snapshot is a full per-bridge view, so absence means cloud-side
+        delete. See the mark-and-sweep block below.
         """
         from app.db.session import AsyncSessionLocal
-        from app.models import Device, Entrance
-        from sqlalchemy import select
+        from app.models import Apartment, Device, Entrance
+        from sqlalchemy import select, update
 
         entrances = (data or {}).get("entrances") or []
         devices = (data or {}).get("devices") or []
@@ -359,12 +363,14 @@ class CloudBridge:
 
         async with AsyncSessionLocal() as db:
             # ── Entrances: upsert by cloud_id ────────────────────────────
+            seen_cloud_ids: set = set()
             for ent in entrances:
                 if not isinstance(ent, dict):
                     continue
                 cid = ent.get("id")
                 if cid is None:
                     continue
+                seen_cloud_ids.add(cid)
                 result = await db.execute(
                     select(Entrance).where(Entrance.cloud_id == cid)
                 )
@@ -382,6 +388,40 @@ class CloudBridge:
                             building_address=ent.get("building_address"),
                         )
                     )
+
+            # ── Mark-and-sweep: drop entrances cloud no longer has ───────
+            # The snapshot is a full, per-bridge-scoped view, so any local
+            # Entrance whose cloud_id is absent from it was deleted on cloud.
+            # Guard: only sweep when at least one valid entrance was seen —
+            # an empty/degenerate snapshot must never wipe the table.
+            # Devices are bridge-managed and are never swept here.
+            entrances_removed = 0
+            if seen_cloud_ids:
+                stale = (
+                    await db.execute(
+                        select(Entrance).where(
+                            Entrance.cloud_id.notin_(list(seen_cloud_ids))
+                        )
+                    )
+                ).scalars().all()
+                if stale:
+                    stale_ids = [e.id for e in stale]
+                    # SQLite runs without PRAGMA foreign_keys, so the FK-level
+                    # ondelete=SET NULL won't fire — null the refs explicitly
+                    # to deliver SET NULL semantics on every backend.
+                    await db.execute(
+                        update(Device)
+                        .where(Device.entrance_id.in_(stale_ids))
+                        .values(entrance_id=None)
+                    )
+                    await db.execute(
+                        update(Apartment)
+                        .where(Apartment.entrance_id.in_(stale_ids))
+                        .values(entrance_id=None)
+                    )
+                    for row in stale:
+                        await db.delete(row)
+                    entrances_removed = len(stale)
 
             # ── Devices: backfill cloud_id / entrance_id / mac on local rows ──
             matched, orphans = 0, 0
@@ -426,6 +466,7 @@ class CloudBridge:
         logger.info(
             "bootstrap_snapshot_applied",
             entrances=len(entrances),
+            entrances_removed=entrances_removed,
             devices_matched=matched,
             devices_orphan=orphans,
         )
