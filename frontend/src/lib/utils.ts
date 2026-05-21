@@ -22,6 +22,16 @@ export const DEVICE_TYPE_LABELS: Record<string, string> = {
   camera: "Камера",
 };
 
+/**
+ * go2rtc stream name for a device. Must mirror the backend
+ * go2rtc_service.stream_name(): cameras get a `camera-` prefix, everything
+ * else (door panels etc.) gets `panel-`.
+ */
+export function streamName(deviceId: number, deviceType?: string): string {
+  const prefix = deviceType === "camera" ? "camera" : "panel";
+  return `${prefix}-${deviceId}`;
+}
+
 export const UNLOCK_METHOD_LABELS: Record<string, string> = {
   http_get: "HTTP GET",
   http_post: "HTTP POST",

@@ -6,7 +6,7 @@ import { Badge, OnlineBadge } from "@/components/ui/Badge";
 import { DeviceFormModal } from "@/components/devices/DeviceFormModal";
 import { WebRTCPlayer } from "@/components/ui/WebRTCPlayer";
 import { toast } from "@/components/ui/Toast";
-import { DEVICE_TYPE_LABELS } from "@/lib/utils";
+import { DEVICE_TYPE_LABELS, streamName } from "@/lib/utils";
 import type { Device, DeviceType } from "@/types";
 import { Plus, Pencil, Trash2, Eye, Filter, Video, X } from "lucide-react";
 
@@ -14,9 +14,9 @@ const DEVICE_TYPES: { value: string; label: string }[] = [
   { value: "", label: "Все типы" },
   { value: "door_station", label: "Панель домофона" },
   { value: "home_station", label: "Домашний монитор" },
+  { value: "camera", label: "Камера" },
   // { value: "guard_station", label: "Пост охраны" },
   // { value: "sip_client", label: "SIP-клиент" },
-  // { value: "camera", label: "Камера" },
 ];
 
 const TYPE_BADGE: Record<
@@ -250,7 +250,9 @@ export function DevicesPage() {
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <WebRTCPlayer src={`panel-${streamDevice.id}`} />
+            <WebRTCPlayer
+              src={streamName(streamDevice.id, streamDevice.device_type)}
+            />
           </div>
         </div>
       )}

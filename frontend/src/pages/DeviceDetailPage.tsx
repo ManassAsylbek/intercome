@@ -17,6 +17,7 @@ import {
   UNLOCK_METHOD_LABELS,
   formatDate,
   formatLatency,
+  streamName,
 } from "@/lib/utils";
 import type { ActionResult } from "@/types";
 import {
@@ -203,7 +204,7 @@ export function DeviceDetailPage() {
           </div>
           {showStream && device.rtsp_enabled && (
             <div className="mt-4 rounded-xl overflow-hidden border border-gray-200">
-              <WebRTCPlayer src={`panel-${device.id}`} />
+              <WebRTCPlayer src={streamName(device.id, device.device_type)} />
             </div>
           )}
         </CardContent>

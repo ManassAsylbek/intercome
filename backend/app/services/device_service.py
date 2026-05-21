@@ -45,7 +45,6 @@ async def get_devices(
 
 async def create_device(db: AsyncSession, data: DeviceCreate, actor: str = "system") -> Device:
     from app.models import ActivityLog
-    from app.services import go2rtc_service
 
     device = Device(**data.model_dump())
     db.add(device)
@@ -61,9 +60,8 @@ async def create_device(db: AsyncSession, data: DeviceCreate, actor: str = "syst
     db.add(log)
     await db.flush()
 
-    if device.enabled and device.rtsp_enabled and device.rtsp_url:
-        await go2rtc_service.sync_stream(device.id, device.rtsp_url)
-
+    # NB: go2rtc.write_config() runs in the route AFTER db.commit() — it opens
+    # its own session and would not see this still-uncommitted row otherwise.
     return device
 
 
@@ -71,7 +69,6 @@ async def update_device(
     db: AsyncSession, device: Device, data: DeviceUpdate, actor: str = "system"
 ) -> Device:
     from app.models import ActivityLog
-    from app.services import go2rtc_service
 
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -87,23 +84,16 @@ async def update_device(
     db.add(log)
     await db.flush()
 
-    # Re-sync go2rtc: update if RTSP active, remove if disabled/cleared.
-    rtsp_fields = {"enabled", "rtsp_enabled", "rtsp_url"}
-    if rtsp_fields & set(update_data.keys()):
-        if device.enabled and device.rtsp_enabled and device.rtsp_url:
-            await go2rtc_service.sync_stream(device.id, device.rtsp_url)
-        else:
-            await go2rtc_service.remove_stream(device.id)
-
+    # NB: go2rtc.write_config() runs in the route AFTER db.commit() so the
+    # fresh-session rebuild sees the updated row. write_config() is a full
+    # rebuild from the DB, so it covers both added and removed RTSP streams.
     return device
 
 
 async def delete_device(db: AsyncSession, device: Device, actor: str = "system") -> None:
     from app.models import ActivityLog
-    from app.services import go2rtc_service
 
     device_id = device.id
-    had_rtsp = bool(device.rtsp_enabled and device.rtsp_url)
 
     log = ActivityLog(
         action=ActivityAction.DEVICE_DELETED,
@@ -116,5 +106,5 @@ async def delete_device(db: AsyncSession, device: Device, actor: str = "system")
     await db.delete(device)
     await db.flush()
 
-    if had_rtsp:
-        await go2rtc_service.remove_stream(device_id)
+    # NB: go2rtc.write_config() runs in the route AFTER db.commit() — a
+    # fresh-session rebuild before commit would still see the deleted row.

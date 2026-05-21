@@ -19,8 +19,16 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-def stream_name(device_id: int) -> str:
-    return f"panel-{device_id}"
+def stream_name(device_id: int, device_type=None) -> str:
+    """go2rtc stream key for a device.
+
+    Cameras are standalone live-view sources, panels are call sources — they
+    get distinct prefixes so the stream name reflects what kind of feed it is.
+    ``device_type`` accepts a DeviceType enum or its plain string value.
+    """
+    dt = getattr(device_type, "value", device_type)
+    prefix = "camera" if dt == "camera" else "panel"
+    return f"{prefix}-{device_id}"
 
 
 def _render_yaml(streams: dict[str, str]) -> str:
@@ -111,7 +119,7 @@ async def write_config() -> None:
             devices = result.scalars().all()
 
         streams = {
-            stream_name(d.id): _rtsp_with_hints(d.rtsp_url)
+            stream_name(d.id, d.device_type): _rtsp_with_hints(d.rtsp_url)
             for d in devices
         }
 

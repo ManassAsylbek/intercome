@@ -1531,7 +1531,7 @@ class CloudBridge:
                         "server": d.sip_server or settings.server_ip,
                         "port": d.sip_port or 5060,
                     } if d.sip_enabled else None,
-                    "rtsp": _rtsp_block(d.id, d.rtsp_url) if d.rtsp_enabled and d.rtsp_url else None,
+                    "rtsp": _rtsp_block(d.id, d.rtsp_url, d.device_type) if d.rtsp_enabled and d.rtsp_url else None,
                     "unlock": {
                         "method": _map_unlock_method(d.unlock_method.value if d.unlock_method else "none"),
                         "url": d.unlock_url,
@@ -1845,9 +1845,9 @@ async def _find_call_channel(call_id: str) -> str | None:
     return None
 
 
-def _rtsp_block(device_id: int, rtsp_url: str) -> dict:
+def _rtsp_block(device_id: int, rtsp_url: str, device_type=None) -> dict:
     """Build the rtsp dict for device_snapshot — includes webrtc/hls URLs."""
-    webrtc_url, hls_url = _build_video_urls(device_id)
+    webrtc_url, hls_url = _build_video_urls(device_id, device_type)
     return {
         "enabled": True,
         "url": rtsp_url,
@@ -1856,21 +1856,27 @@ def _rtsp_block(device_id: int, rtsp_url: str) -> dict:
     }
 
 
-def _build_video_urls(device_id: int | None) -> tuple[str | None, str | None]:
-    """Build go2rtc WHEP + HLS URLs for the given panel device.
+def _build_video_urls(
+    device_id: int | None, device_type=None
+) -> tuple[str | None, str | None]:
+    """Build go2rtc WHEP + HLS URLs for the given device.
 
     Uses PUBLIC_BRIDGE_HOST so mobile clients reach the bridge from outside the
-    LAN. Falls back to intercom_public_base_url, then server_ip.
+    LAN. Falls back to intercom_public_base_url, then server_ip. ``device_type``
+    picks the go2rtc stream prefix (camera-* for cameras, panel-* otherwise) and
+    must stay in sync with go2rtc_service.stream_name.
     """
     if not device_id:
         return None, None
+    from app.services.go2rtc_service import stream_name
+
     host = (
         settings.public_bridge_host
         or (settings.intercom_public_base_url.replace("https://", "").replace("http://", "").rstrip("/"))
         or settings.server_ip
     )
     base = f"https://{host}" if not host.startswith(("http://", "https://")) else host
-    src = f"panel-{device_id}"
+    src = stream_name(device_id, device_type)
     return (
         f"{base}/go2rtc/api/webrtc?src={src}",
         f"{base}/go2rtc/api/stream.m3u8?src={src}",
