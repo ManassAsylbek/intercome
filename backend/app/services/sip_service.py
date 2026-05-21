@@ -57,6 +57,10 @@ context=intercom
 disallow=all
 allow=alaw
 allow=ulaw
+; video — door panels / indoor monitors are video intercoms; without a
+; video codec in the allow-list Asterisk strips the video stream and the
+; call connects audio-only. h264 is the standard for Dahua/Hikvision.
+allow=h264
 auth=auth{acct}
 aors={acct}
 direct_media=no

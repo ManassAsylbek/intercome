@@ -18,6 +18,10 @@ class ActiveCall:
     callee: str
     started_at: str = field(default_factory=_utcnow_iso)
     apartment_id: Optional[int] = None
+    # go2rtc stream name of the caller panel, e.g. "panel-29". Carried on the
+    # dataclass so a mid-call SSE (re)connect — which replays get_active()
+    # via asdict() — also gets the right camera, not just the live AMI event.
+    video_src: Optional[str] = None
 
 
 class CallStore:

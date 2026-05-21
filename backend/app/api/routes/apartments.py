@@ -28,8 +28,14 @@ router = APIRouter(prefix="/apartments", tags=["apartments"])
 
 
 async def _get_apartment(db: AsyncSession, apt_id: int) -> Apartment | None:
+    # populate_existing: the session uses expire_on_commit=False, so after a
+    # commit the Apartment may still sit in the identity map with a stale
+    # (already-loaded) .monitors collection. Without this flag selectinload
+    # would not overwrite it, and a write endpoint would return / act on the
+    # pre-commit monitor list. populate_existing forces a refresh from the row.
     result = await db.execute(
         select(Apartment)
+        .execution_options(populate_existing=True)
         .options(selectinload(Apartment.monitors), selectinload(Apartment.source_devices))
         .where(Apartment.id == apt_id)
     )
@@ -49,6 +55,12 @@ async def _rebuild_dialplan(db: AsyncSession) -> None:
     """
     result = await db.execute(
         select(Apartment)
+        # populate_existing: same expire_on_commit=False caveat as in
+        # _get_apartment — when called right after a commit in the same
+        # request, apartments cached in the identity map would otherwise
+        # keep their stale .monitors and the dialplan would be regenerated
+        # without the just-added monitors.
+        .execution_options(populate_existing=True)
         .options(selectinload(Apartment.monitors))
         .where(Apartment.enabled == True)  # noqa: E712
         .order_by(Apartment.number)

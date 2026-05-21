@@ -114,6 +114,7 @@ async def on_dial_begin(manager, event) -> None:
     # Resolve caller device once — used in both local SSE and cloud event.
     caller_device_id, video_rtsp = await _lookup_caller_device(caller)
     video_src = f"panel-{caller_device_id}" if caller_device_id else None
+    active.video_src = video_src  # keep get_active() consistent for SSE reconnects
 
     local_data = {
         "call_id": call_id,
@@ -285,6 +286,7 @@ async def on_newchannel(manager, event) -> None:
     active = call_store.on_call_started(call_id=call_id, caller=caller, callee=callee)
     caller_device_id, video_rtsp = await _lookup_caller_device(caller)
     video_src = f"panel-{caller_device_id}" if caller_device_id else None
+    active.video_src = video_src  # keep get_active() consistent for SSE reconnects
 
     await event_bus.publish("call_started", {
         "call_id": call_id,
