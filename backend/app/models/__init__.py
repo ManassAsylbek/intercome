@@ -52,6 +52,9 @@ class ActivityAction(str, enum.Enum):
     RULE_CREATED = "rule_created"
     RULE_UPDATED = "rule_updated"
     RULE_DELETED = "rule_deleted"
+    PLATE_CREATED = "plate_created"
+    PLATE_UPDATED = "plate_updated"
+    PLATE_DELETED = "plate_deleted"
     DOOR_CALL = "door_call"
     DOOR_CALL_END = "door_call_end"
 
@@ -112,6 +115,11 @@ class Device(Base):
     # RTSP
     rtsp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     rtsp_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # ANPR / parking barrier — set on Dahua ITC ANPR cameras. When true the
+    # anpr_service keeps a long-poll event subscription to this camera and
+    # opens the barrier (AlarmOut[0] relay) on a whitelisted plate.
+    anpr_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # HTTP unlock
     unlock_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -188,6 +196,68 @@ class RoutingRule(Base):
     )
     target_device: Mapped["Device | None"] = relationship(
         "Device", foreign_keys=[target_device_id], back_populates="routing_rules_as_target"
+    )
+
+
+# ─── Plate whitelist (parking ANPR) ──────────────────────────────────────────
+
+
+class PlateWhitelist(Base):
+    """Разрешённый автомобильный номер для парковочного шлагбаума.
+
+    ``plate`` хранится в нормализованном виде (верхний регистр, без пробелов
+    и дефисов, кириллические двойники свёрнуты в латиницу) — см.
+    ``plate_service.normalize_plate``. ANPR-камера присылает распознанный
+    номер, бэкенд нормализует его так же и ищет точное совпадение здесь.
+    """
+
+    __tablename__ = "plate_whitelist"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    plate: Mapped[str] = mapped_column(
+        String(16), nullable=False, unique=True, index=True
+    )
+    owner_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    apartment_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("apartments.id", ondelete="SET NULL"), nullable=True
+    )
+    entrance_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("entrances.id", ondelete="SET NULL"), nullable=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class PlateAccessLog(Base):
+    """Журнал проездов — одна запись на каждое распознавание номера ANPR-камерой.
+
+    Пишется ``anpr_service``: распознан номер → проверка по [[plate-whitelist]]
+    → открытие шлагбаума или отказ. ``action`` = opened | denied | open_failed.
+    """
+
+    __tablename__ = "plate_access_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    device_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
+    )
+    plate: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    plate_raw: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    matched: Mapped[bool] = mapped_column(Boolean, default=False)
+    whitelist_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("plate_whitelist.id", ondelete="SET NULL"), nullable=True
+    )
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
     )
 
 

@@ -10,6 +10,7 @@ import {
   Monitor,
   GitFork,
   Building2,
+  Car,
   Settings,
   LogOut,
   Radio,
@@ -20,6 +21,7 @@ const navItems = [
   { to: "/devices", icon: Monitor, label: "Устройства" },
   { to: "/apartments", icon: Building2, label: "Квартиры" },
   { to: "/routing", icon: GitFork, label: "Маршрутизация" },
+  { to: "/plates", icon: Car, label: "Номера авто" },
   { to: "/settings", icon: Settings, label: "Настройки" },
 ];
 

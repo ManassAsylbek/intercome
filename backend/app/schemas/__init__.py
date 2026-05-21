@@ -75,6 +75,9 @@ class DeviceBase(BaseModel):
     rtsp_enabled: bool = False
     rtsp_url: Optional[str] = None
 
+    # ANPR / parking barrier
+    anpr_enabled: bool = False
+
     # Unlock
     unlock_enabled: bool = False
     unlock_method: UnlockMethod = UnlockMethod.NONE
@@ -126,6 +129,7 @@ class DeviceUpdate(BaseModel):
     sip_proxy: Optional[str] = None
     rtsp_enabled: Optional[bool] = None
     rtsp_url: Optional[str] = None
+    anpr_enabled: Optional[bool] = None
     unlock_enabled: Optional[bool] = None
     unlock_method: Optional[UnlockMethod] = None
     unlock_url: Optional[str] = None
@@ -201,6 +205,63 @@ class RoutingRuleOut(RoutingRuleBase):
 
 class RoutingRuleListOut(BaseModel):
     items: list[RoutingRuleOut]
+    total: int
+
+
+# ─── Plate whitelist (parking ANPR) ──────────────────────────────────────────
+
+
+class PlateBase(BaseModel):
+    plate: str = Field(..., min_length=1, max_length=16)
+    owner_name: Optional[str] = Field(None, max_length=128)
+    apartment_id: Optional[int] = None
+    entrance_id: Optional[int] = None
+    enabled: bool = True
+    notes: Optional[str] = None
+
+
+class PlateCreate(PlateBase):
+    pass
+
+
+class PlateUpdate(BaseModel):
+    plate: Optional[str] = Field(None, min_length=1, max_length=16)
+    owner_name: Optional[str] = Field(None, max_length=128)
+    apartment_id: Optional[int] = None
+    entrance_id: Optional[int] = None
+    enabled: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class PlateOut(PlateBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PlateListOut(BaseModel):
+    items: list[PlateOut]
+    total: int
+
+
+class PlateAccessLogOut(BaseModel):
+    id: int
+    device_id: Optional[int] = None
+    plate: str
+    plate_raw: Optional[str] = None
+    matched: bool
+    whitelist_id: Optional[int] = None
+    action: str
+    detail: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PlateAccessLogListOut(BaseModel):
+    items: list[PlateAccessLogOut]
     total: int
 
 

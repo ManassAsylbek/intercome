@@ -151,6 +151,8 @@ const schema = z
     // RTSP
     rtsp_enabled: z.boolean(),
     rtsp_url: optionalProtoUrl("rtsp"),
+    // ANPR / parking barrier
+    anpr_enabled: z.boolean(),
     // Unlock
     unlock_enabled: z.boolean(),
     unlock_method: z.enum(["http_get", "http_post", "sip_dtmf", "none"]),
@@ -265,6 +267,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
       enabled: true,
       sip_enabled: false,
       rtsp_enabled: false,
+      anpr_enabled: false,
       unlock_enabled: false,
       unlock_method: "none",
     },
@@ -291,6 +294,7 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
         enabled: true,
         sip_enabled: false,
         rtsp_enabled: false,
+        anpr_enabled: false,
         unlock_enabled: false,
         unlock_method: "none",
       });
@@ -433,9 +437,9 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
             >
               <option value="door_station">Панель домофона</option>
               <option value="home_station">Домашний монитор</option>
+              <option value="camera">Камера</option>
               {/* <option value="guard_station">Пост охраны</option>
-              <option value="sip_client">SIP-клиент</option>
-              <option value="camera">Камера</option> */}
+              <option value="sip_client">SIP-клиент</option> */}
             </Select>
             <div className="flex flex-col gap-1">
               <label className="text-sm font-medium text-gray-700">
@@ -646,6 +650,32 @@ export function DeviceFormModal({ open, onClose, device }: Props) {
               error={errors.rtsp_url?.message}
             />
           )}
+        </section>
+
+        <hr className="border-gray-100" />
+
+        {/* ANPR / parking barrier */}
+        <section>
+          <div className="flex items-center gap-3 mb-3">
+            <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+              ANPR / шлагбаум
+            </h3>
+            <Controller
+              control={control}
+              name="anpr_enabled"
+              render={({ field }) => (
+                <Checkbox
+                  label="Распознавание номеров"
+                  {...field}
+                  checked={field.value}
+                />
+              )}
+            />
+          </div>
+          <p className="text-xs text-gray-400">
+            Для ANPR-камер Dahua ITC. Сервер слушает события распознавания и
+            открывает шлагбаум автоматически по белому списку «Номера авто».
+          </p>
         </section>
 
         <hr className="border-gray-100" />

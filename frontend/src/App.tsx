@@ -9,6 +9,7 @@ import { DashboardPage } from "@/pages/DashboardPage";
 import { DevicesPage } from "@/pages/DevicesPage";
 import { DeviceDetailPage } from "@/pages/DeviceDetailPage";
 import { RoutingRulesPage } from "@/pages/RoutingRulesPage";
+import { PlatesPage } from "@/pages/PlatesPage";
 import { ApartmentsPage } from "@/pages/ApartmentsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 
@@ -35,6 +36,7 @@ export default function App() {
                 <Route path="/devices" element={<DevicesPage />} />
                 <Route path="/devices/:id" element={<DeviceDetailPage />} />
                 <Route path="/routing" element={<RoutingRulesPage />} />
+                <Route path="/plates" element={<PlatesPage />} />
                 <Route path="/apartments" element={<ApartmentsPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Route>

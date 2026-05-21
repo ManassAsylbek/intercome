@@ -14,6 +14,10 @@ import type {
   Entrance,
   HealthOut,
   LoginRequest,
+  Plate,
+  PlateCreate,
+  PlateListOut,
+  PlateUpdate,
   RoutingRule,
   RoutingRuleCreate,
   RoutingRuleListOut,
@@ -88,6 +92,23 @@ export const routingApi = {
       .then((r) => r.data),
 
   delete: (id: number) => apiClient.delete(`/routing-rules/${id}`),
+};
+
+// ─── Plates (parking ANPR whitelist) ──────────────────────────────────────────
+
+export const platesApi = {
+  list: () => apiClient.get<PlateListOut>("/plates").then((r) => r.data),
+
+  get: (id: number) =>
+    apiClient.get<Plate>(`/plates/${id}`).then((r) => r.data),
+
+  create: (data: PlateCreate) =>
+    apiClient.post<Plate>("/plates", data).then((r) => r.data),
+
+  update: (id: number, data: PlateUpdate) =>
+    apiClient.put<Plate>(`/plates/${id}`, data).then((r) => r.data),
+
+  delete: (id: number) => apiClient.delete(`/plates/${id}`),
 };
 
 // ─── Apartments ───────────────────────────────────────────────────────────────

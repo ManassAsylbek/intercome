@@ -70,6 +70,7 @@ export interface Device {
   sip_proxy: string | null;
   rtsp_enabled: boolean;
   rtsp_url: string | null;
+  anpr_enabled: boolean;
   unlock_enabled: boolean;
   unlock_method: UnlockMethod;
   unlock_url: string | null;
@@ -129,6 +130,28 @@ export type RoutingRuleUpdate = Partial<RoutingRuleCreate>;
 
 export interface RoutingRuleListOut {
   items: RoutingRule[];
+  total: number;
+}
+
+// ─── Plate whitelist (parking ANPR) ───────────────────────────────────────────
+
+export interface Plate {
+  id: number;
+  plate: string;
+  owner_name: string | null;
+  apartment_id: number | null;
+  entrance_id: number | null;
+  enabled: boolean;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type PlateCreate = Omit<Plate, "id" | "created_at" | "updated_at">;
+export type PlateUpdate = Partial<PlateCreate>;
+
+export interface PlateListOut {
+  items: Plate[];
   total: number;
 }
 

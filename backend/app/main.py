@@ -82,6 +82,11 @@ async def lifespan(app: FastAPI):
     # Start background device polling
     polling_task = asyncio.create_task(start_polling())
 
+    # Start ANPR listener — long-poll plate-recognition events from
+    # anpr_enabled cameras and drive the parking barrier.
+    from app.services import anpr_service
+    await anpr_service.start()
+
     yield
 
     polling_task.cancel()

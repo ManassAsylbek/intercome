@@ -18,7 +18,7 @@ from app.schemas import (
     DeviceUpdate,
     SipApplyRequest,
 )
-from app.services import connectivity_service, device_service, unlock_service
+from app.services import connectivity_service, device_service, go2rtc_service, unlock_service
 from app.services.sip_service import sip_service
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -46,12 +46,15 @@ async def create_device(
     current_user: User = Depends(get_current_user),
 ):
     device = await device_service.create_device(db, payload, actor=current_user.username)
-    # Commit before mirroring: emit_device_upserted opens its own session and
+    # Commit before side effects: emit_device_upserted opens its own session and
     # writes devices.cloud_synced — if the request transaction is still open
     # it holds a row lock on this device and the two sessions self-deadlock.
     # Committing first also makes the row visible so the device actually
-    # mirrors to cloud on creation (otherwise emit sees no row).
+    # mirrors to cloud / appears in the go2rtc rebuild (both open fresh
+    # sessions). go2rtc.write_config() is a full DB rebuild — calling it
+    # unconditionally keeps go2rtc.yaml in sync for any device change.
     await db.commit()
+    await go2rtc_service.write_config()
     from app.cloud.bridge import cloud_bridge
     await cloud_bridge.emit_device_upserted(device.id)
     return device
@@ -80,9 +83,10 @@ async def update_device(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     device = await device_service.update_device(db, device, payload, actor=current_user.username)
-    # Commit before mirroring — see create_device: emit opens a second session
-    # and updating the same still-locked device row would self-deadlock.
+    # Commit before side effects — see create_device: emit and the go2rtc
+    # rebuild both open second sessions and need the committed row.
     await db.commit()
+    await go2rtc_service.write_config()
     from app.cloud.bridge import cloud_bridge
     await cloud_bridge.emit_device_upserted(device.id)
     return device
@@ -98,6 +102,31 @@ async def delete_device(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     await device_service.delete_device(db, device, actor=current_user.username)
+    # Commit before the go2rtc rebuild: write_config() opens a fresh session
+    # and must not see the just-deleted row.
+    await db.commit()
+    await go2rtc_service.write_config()
+
+
+@router.post("/{device_id}/barrier/open", response_model=ActionResult)
+async def open_barrier(
+    device_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Manually open the parking barrier — pulses the camera's AlarmOut relay.
+
+    The whitelist auto-opens via anpr_service; this is the operator override.
+    """
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    from app.services import barrier_service
+    ok = await barrier_service.open_barrier(device)
+    return ActionResult(
+        success=ok,
+        message="Шлагбаум открыт" if ok else "Не удалось открыть шлагбаум",
+    )
 
 
 @router.post("/{device_id}/test-connection", response_model=ActionResult)
