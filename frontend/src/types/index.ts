@@ -155,6 +155,23 @@ export interface PlateListOut {
   total: number;
 }
 
+export interface PlateAccessLog {
+  id: number;
+  device_id: number | null;
+  plate: string;
+  plate_raw: string | null;
+  matched: boolean;
+  whitelist_id: number | null;
+  action: string;
+  detail: string | null;
+  created_at: string;
+}
+
+export interface PlateAccessLogListOut {
+  items: PlateAccessLog[];
+  total: number;
+}
+
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
 export interface ActivityLog {

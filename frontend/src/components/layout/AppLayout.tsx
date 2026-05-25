@@ -2,8 +2,10 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { useCallEvents } from "@/hooks/useCallEvents";
+import { usePlateEvents } from "@/hooks/usePlateEvents";
 import { useSIPClient, type SIPCallState } from "@/hooks/useSIPClient";
 import { CallBanner } from "@/components/ui/CallBanner";
+import { PlateBanner } from "@/components/ui/PlateBanner";
 import { cn } from "@/lib/utils";
 import {
   LayoutDashboard,
@@ -28,6 +30,7 @@ const navItems = [
 export function AppLayout() {
   const { user, logout } = useAuth();
   const { activeCall } = useCallEvents();
+  const { event: plateEvent, clear: clearPlateEvent } = usePlateEvents();
   const [dismissed, setDismissed] = useState(false);
   const [sipState, setSipState] = useState<SIPCallState>("idle");
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -161,6 +164,11 @@ export function AppLayout() {
           onAnswer={answer}
           onHangup={hangup}
         />
+      )}
+
+      {/* ANPR plate-recognition signalling — green/red + sound */}
+      {plateEvent && (
+        <PlateBanner event={plateEvent} onDismiss={clearPlateEvent} />
       )}
     </div>
   );

@@ -4,6 +4,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import {
   usePlates,
+  usePlateLog,
   useCreatePlate,
   useUpdatePlate,
   useDeletePlate,
@@ -15,8 +16,27 @@ import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Input, Select, Textarea } from "@/components/ui/FormFields";
 import { toast } from "@/components/ui/Toast";
+import { formatDate } from "@/lib/utils";
 import type { Plate } from "@/types";
-import { Plus, Pencil, Trash2, Car } from "lucide-react";
+import { Plus, Pencil, Trash2, Car, ScrollText } from "lucide-react";
+
+const ACTION_TAG: Record<string, [string, string]> = {
+  opened: ["Открыт", "bg-green-100 text-green-700"],
+  denied: ["Отказ", "bg-red-100 text-red-700"],
+  open_failed: ["Ошибка открытия", "bg-orange-100 text-orange-700"],
+};
+
+function ActionTag({ action }: { action: string }) {
+  const [label, cls] = ACTION_TAG[action] ?? [
+    action,
+    "bg-gray-100 text-gray-600",
+  ];
+  return (
+    <span className={`px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
+      {label}
+    </span>
+  );
+}
 
 // Empty <Select> submits "" — coerce that to null rather than letting
 // z.coerce.number() turn it into 0 (no apartment/entrance has id 0, the
@@ -200,6 +220,7 @@ function PlateFormModal({
 
 export function PlatesPage() {
   const { data, isLoading } = usePlates();
+  const { data: logData, isLoading: logLoading } = usePlateLog();
   const { data: apartmentsData } = useApartments();
   const { data: entrances } = useEntrances();
   const deletePlate = useDeletePlate();
@@ -347,6 +368,63 @@ export function PlatesPage() {
             </tbody>
           </table>
         )}
+      </div>
+
+      {/* Журнал проездов */}
+      <div>
+        <h2 className="text-lg font-bold text-gray-900">Журнал проездов</h2>
+        <p className="text-gray-500 text-sm mt-1 mb-3">
+          Последние распознавания номеров ANPR-камерами
+        </p>
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          {logLoading ? (
+            <div className="p-8 text-center text-gray-400">Загрузка…</div>
+          ) : !logData?.items.length ? (
+            <div className="p-10 text-center">
+              <ScrollText className="w-9 h-9 text-gray-300 mx-auto mb-2" />
+              <p className="text-gray-400">Проездов пока не зафиксировано.</p>
+            </div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 border-b border-gray-100">
+                <tr>
+                  <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">
+                    Время
+                  </th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
+                    Номер
+                  </th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
+                    Распознан
+                  </th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
+                    Результат
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {logData.items.map((row) => (
+                  <tr key={row.id} className="hover:bg-gray-50">
+                    <td className="px-6 py-3 text-gray-500 text-xs whitespace-nowrap">
+                      {formatDate(row.created_at)}
+                    </td>
+                    <td className="px-4 py-3">
+                      <code className="bg-gray-100 text-indigo-700 px-2 py-1 rounded text-xs font-mono font-semibold">
+                        {row.plate}
+                      </code>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-gray-500">
+                      {row.matched ? "В списке" : "Не в списке"}
+                    </td>
+                    <td className="px-4 py-3">
+                      <ActionTag action={row.action} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       </div>
 
       <PlateFormModal

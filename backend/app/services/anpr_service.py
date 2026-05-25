@@ -129,17 +129,24 @@ async def _handle_plate(device_id: int, raw_plate: str) -> None:
         await db.commit()
         owner = match.owner_name if match else None
 
-    await event_bus.publish(
-        "plate_recognized",
-        {
-            "device_id": device_id,
-            "plate": plate,
-            "matched": matched,
-            "granted": matched,
-            "action": action,
-            "owner": owner,
-        },
-    )
+    payload = {
+        "device_id": device_id,
+        "plate": plate,
+        "matched": matched,
+        "granted": matched,
+        "action": action,
+        "owner": owner,
+    }
+    # Local SSE (admin UI signalling).
+    await event_bus.publish("plate_recognized", payload)
+    # Cloud relay (mobile signalling) — best-effort, skip if bridge is down.
+    try:
+        from app.cloud.bridge import cloud_bridge
+
+        await cloud_bridge.send_event("plate_recognized", payload)
+    except Exception as exc:
+        logger.warning("anpr_cloud_publish_failed", error=str(exc))
+
     logger.info(
         "anpr_plate", device_id=device_id, plate=plate, matched=matched, action=action
     )
@@ -148,13 +155,21 @@ async def _handle_plate(device_id: int, raw_plate: str) -> None:
 async def _listen(device_id: int, host: str, user: str, pwd: str) -> None:
     """Maintain the long-poll event subscription to one camera, forever."""
     url = f"http://{host}/cgi-bin/eventManager.cgi"
-    params = {"action": "attach", "codes": "[TrafficJunction]"}
+    # heartbeat=N → camera sends a keep-alive every N seconds. Combined with a
+    # finite read timeout below this turns a silently dead TCP connection into
+    # a ReadTimeout we can recover from, instead of hanging forever.
+    params = {
+        "action": "attach",
+        "codes": "[TrafficJunction]",
+        "heartbeat": "10",
+    }
     auth = httpx.DigestAuth(user, pwd)
 
     while True:
         try:
-            # connect/write timeout finite, read timeout None — it's long-poll.
-            timeout = httpx.Timeout(10.0, read=None)
+            # read timeout (45s) > heartbeat interval (10s): a healthy stream
+            # never times out, a stale one raises ReadTimeout and reconnects.
+            timeout = httpx.Timeout(10.0, read=45.0)
             async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
                 async with client.stream(
                     "GET", url, params=params, auth=auth

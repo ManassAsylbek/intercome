@@ -3,11 +3,19 @@ import { platesApi } from "@/api";
 import type { PlateCreate, PlateUpdate } from "@/types";
 
 export const PLATES_KEY = ["plates"] as const;
+export const PLATE_LOG_KEY = ["plate-log"] as const;
 
 export function usePlates() {
   return useQuery({
     queryKey: PLATES_KEY,
     queryFn: () => platesApi.list(),
+  });
+}
+
+export function usePlateLog() {
+  return useQuery({
+    queryKey: PLATE_LOG_KEY,
+    queryFn: () => platesApi.log(),
   });
 }
 

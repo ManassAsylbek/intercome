@@ -15,6 +15,7 @@ import type {
   HealthOut,
   LoginRequest,
   Plate,
+  PlateAccessLogListOut,
   PlateCreate,
   PlateListOut,
   PlateUpdate,
@@ -109,6 +110,11 @@ export const platesApi = {
     apiClient.put<Plate>(`/plates/${id}`, data).then((r) => r.data),
 
   delete: (id: number) => apiClient.delete(`/plates/${id}`),
+
+  log: (limit = 100) =>
+    apiClient
+      .get<PlateAccessLogListOut>("/plates/log", { params: { limit } })
+      .then((r) => r.data),
 };
 
 // ─── Apartments ───────────────────────────────────────────────────────────────
