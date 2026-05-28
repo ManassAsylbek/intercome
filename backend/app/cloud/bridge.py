@@ -259,7 +259,10 @@ class CloudBridge:
             "rename_apartment": self._cmd_rename_apartment,
             "delete_apartment": self._cmd_delete_apartment,
             "set_apartment_monitors": self._cmd_set_monitors,
+            "plate_upsert": self._cmd_plate_upsert,
+            "plate_delete": self._cmd_plate_delete,
             "unlock_door": self._cmd_unlock_door,
+            "open_barrier": self._cmd_open_barrier,
             "reject_call": self._cmd_reject_call,
             "answer_call": self._cmd_answer_call,
             "re_invite_apartment": self._cmd_re_invite_apartment,
@@ -352,12 +355,18 @@ class CloudBridge:
         delete. See the mark-and-sweep block below.
         """
         from app.db.session import AsyncSessionLocal
-        from app.models import Apartment, Device, Entrance
+        from app.models import Apartment, Device, Entrance, PlateWhitelist
+        from app.services import plate_service
         from sqlalchemy import select, update
 
         entrances = (data or {}).get("entrances") or []
         devices = (data or {}).get("devices") or []
-        if not isinstance(entrances, list) or not isinstance(devices, list):
+        plates = (data or {}).get("plates") or []
+        if (
+            not isinstance(entrances, list)
+            or not isinstance(devices, list)
+            or not isinstance(plates, list)
+        ):
             logger.warning("bootstrap_snapshot_invalid_shape", entrances=type(entrances).__name__)
             return
 
@@ -461,6 +470,77 @@ class CloudBridge:
                 dev.last_cloud_sync_error = None
                 matched += 1
 
+            # ── Plates: cloud-managed whitelist (B1) ─────────────────────
+            # Cloud is sole writer. We mirror the full per-bridge whitelist
+            # so anpr_service matches in real time. Upsert by normalised
+            # plate string, then mark-and-sweep anything cloud no longer has.
+            # Local write API is disabled — see app/api/routes/plates.py.
+            plates_seen: set[str] = set()
+            plates_upserted = 0
+            for p in plates:
+                if not isinstance(p, dict):
+                    continue
+                raw = p.get("plate")
+                if not isinstance(raw, str):
+                    continue
+                norm = plate_service.normalize_plate(raw)
+                if not norm:
+                    continue
+                plates_seen.add(norm)
+
+                row = (
+                    await db.execute(
+                        select(PlateWhitelist).where(PlateWhitelist.plate == norm)
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    row = PlateWhitelist(plate=norm)
+                    db.add(row)
+
+                row.owner_name = p.get("owner_name")
+                row.notes = p.get("notes")
+                row.enabled = bool(p.get("enabled", True))
+
+                ap_cid = p.get("apartment_cloud_id")
+                if ap_cid is None:
+                    row.apartment_id = None
+                else:
+                    ap = (
+                        await db.execute(
+                            select(Apartment).where(Apartment.cloud_id == ap_cid)
+                        )
+                    ).scalar_one_or_none()
+                    row.apartment_id = ap.id if ap else None
+
+                en_cid = p.get("entrance_cloud_id")
+                if en_cid is None:
+                    row.entrance_id = None
+                else:
+                    en = (
+                        await db.execute(
+                            select(Entrance).where(Entrance.cloud_id == en_cid)
+                        )
+                    ).scalar_one_or_none()
+                    row.entrance_id = en.id if en else None
+
+                plates_upserted += 1
+
+            # Mark-and-sweep: drop plates cloud no longer has. Guard against
+            # an empty/degenerate snapshot wiping the table — only sweep if
+            # the snapshot actually carried a plates block.
+            plates_removed = 0
+            if "plates" in (data or {}):
+                stale_plates = (
+                    await db.execute(
+                        select(PlateWhitelist).where(
+                            PlateWhitelist.plate.notin_(list(plates_seen) or [""])
+                        )
+                    )
+                ).scalars().all()
+                for row in stale_plates:
+                    await db.delete(row)
+                plates_removed = len(stale_plates)
+
             await db.commit()
 
         logger.info(
@@ -469,6 +549,8 @@ class CloudBridge:
             entrances_removed=entrances_removed,
             devices_matched=matched,
             devices_orphan=orphans,
+            plates_upserted=plates_upserted,
+            plates_removed=plates_removed,
         )
 
     async def _cmd_apartment_upserted_ack(self, data: dict, **_) -> None:
@@ -1055,6 +1137,142 @@ class CloudBridge:
             "apartment_created": created,
         }
 
+    async def _cmd_plate_upsert(self, data: dict, **_) -> dict:
+        """Idempotent INSERT-or-UPDATE a plate in the whitelist.
+
+        Cloud is the source of truth for the parking whitelist; this handler
+        keeps a local mirror so ``anpr_service`` matches in real time
+        without round-tripping on every camera event. Keyed by the
+        normalised plate (``plate_service.normalize_plate``) so re-deliveries
+        with the same plate are no-ops on the data and update only metadata.
+
+        Optional fields:
+          - ``owner_name`` (str)
+          - ``notes`` (str)
+          - ``enabled`` (bool)
+          - ``apartment_cloud_id`` / ``entrance_cloud_id`` (resolved to local
+            FKs via existing cloud_id mapping; null clears the link).
+        """
+        from app.db.session import AsyncSessionLocal
+        from app.models import Apartment, Entrance, PlateWhitelist
+        from app.services import plate_service
+        from sqlalchemy import select
+
+        raw_plate = (data or {}).get("plate")
+        if not raw_plate or not isinstance(raw_plate, str):
+            return {"success": False, "message": "plate is required"}
+
+        plate = plate_service.normalize_plate(raw_plate)
+        if not plate:
+            return {"success": False, "message": "plate empty after normalisation"}
+
+        async with AsyncSessionLocal() as db:
+            row = (
+                await db.execute(
+                    select(PlateWhitelist).where(PlateWhitelist.plate == plate)
+                )
+            ).scalar_one_or_none()
+
+            created = False
+            if row is None:
+                row = PlateWhitelist(plate=plate)
+                db.add(row)
+                created = True
+
+            if "owner_name" in data:
+                row.owner_name = data.get("owner_name")
+            if "notes" in data:
+                row.notes = data.get("notes")
+            if "enabled" in data:
+                row.enabled = bool(data.get("enabled"))
+
+            # apartment_id / entrance_id arrive as cloud_ids — resolve to local
+            # FKs. Explicit None clears the link; absence leaves it untouched.
+            if "apartment_cloud_id" in data:
+                cid = data["apartment_cloud_id"]
+                if cid is None:
+                    row.apartment_id = None
+                else:
+                    ap = (
+                        await db.execute(
+                            select(Apartment).where(Apartment.cloud_id == cid)
+                        )
+                    ).scalar_one_or_none()
+                    row.apartment_id = ap.id if ap else None
+            if "entrance_cloud_id" in data:
+                cid = data["entrance_cloud_id"]
+                if cid is None:
+                    row.entrance_id = None
+                else:
+                    en = (
+                        await db.execute(
+                            select(Entrance).where(Entrance.cloud_id == cid)
+                        )
+                    ).scalar_one_or_none()
+                    row.entrance_id = en.id if en else None
+
+            await db.commit()
+            await db.refresh(row)
+            local_id = row.id
+
+        logger.info(
+            "plate_upsert_via_ws",
+            plate=plate,
+            local_id=local_id,
+            created=created,
+        )
+        return {
+            "success": True,
+            "message": f"plate {plate} {'created' if created else 'updated'}",
+            "plate_local_id": local_id,
+            "plate": plate,
+            "created": created,
+        }
+
+    async def _cmd_plate_delete(self, data: dict, **_) -> dict:
+        """Idempotent DELETE a plate from the whitelist.
+
+        Matches by normalised plate string (cloud sends raw, we normalise the
+        same way). A missing plate is reported as a successful no-op so
+        cloud's drain-then-delete sequence is safe to re-deliver.
+        """
+        from app.db.session import AsyncSessionLocal
+        from app.models import PlateWhitelist
+        from app.services import plate_service
+        from sqlalchemy import select
+
+        raw_plate = (data or {}).get("plate")
+        if not raw_plate or not isinstance(raw_plate, str):
+            return {"success": False, "message": "plate is required"}
+
+        plate = plate_service.normalize_plate(raw_plate)
+        if not plate:
+            return {"success": False, "message": "plate empty after normalisation"}
+
+        async with AsyncSessionLocal() as db:
+            row = (
+                await db.execute(
+                    select(PlateWhitelist).where(PlateWhitelist.plate == plate)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return {
+                    "success": True,
+                    "message": f"plate {plate} not in whitelist (already gone)",
+                    "plate": plate,
+                    "deleted": False,
+                }
+            await db.delete(row)
+            await db.commit()
+
+        logger.info("plate_delete_via_ws", plate=plate)
+        return {
+            "success": True,
+            "message": f"plate {plate} deleted",
+            "plate": plate,
+            "deleted": True,
+        }
+
     async def _cmd_unlock_door(self, data: dict, **_) -> dict:
         """Unlock the panel that placed the active call (or one given by id).
 
@@ -1151,6 +1369,101 @@ class CloudBridge:
                 },
             )
             response["unlocked"] = True  # legacy/back-compat
+
+        return response
+
+    async def _cmd_open_barrier(self, data: dict, **_) -> dict:
+        """Pulse the AlarmOut relay on an ANPR camera to raise the barrier.
+
+        Mobile-initiated barrier open: same wire as ``unlock_door`` but for
+        parking gates. Physical work is delegated to ``barrier_service.
+        open_barrier``, which drives Dahua ITC ``AlarmOut[0]`` via digest-
+        authed configManager.cgi (see that module for relay wiring notes).
+
+        Resolution order for the target camera:
+          1. ``device_local_id`` (our bridge primary key) — preferred.
+          2. ``device_cloud_id`` — resolved via ``Device.cloud_id`` mapping.
+          3. Fallback: first enabled, ``anpr_enabled`` device.
+
+        Ack shape mirrors ``unlock_door`` so the mobile UI can reuse the
+        same handler for both actions.
+        """
+        import time
+        from app.db.session import AsyncSessionLocal
+        from app.models import Device
+        from app.services import barrier_service
+        from sqlalchemy import select
+
+        device_local_id = (data or {}).get("device_local_id")
+        device_cloud_id = (data or {}).get("device_cloud_id")
+        by_user_id = (data or {}).get("user_id")
+        actor = f"cloud:user:{by_user_id}" if by_user_id else "cloud"
+
+        async with AsyncSessionLocal() as db:
+            device: Device | None = None
+
+            if device_local_id:
+                device = await db.get(Device, device_local_id)
+                if device and not device.anpr_enabled:
+                    return {
+                        "success": False,
+                        "message": f"device_local_id={device_local_id} is not anpr_enabled",
+                        "device_id": device.id,
+                        "device_name": device.name,
+                    }
+
+            if device is None and device_cloud_id:
+                device = (
+                    await db.execute(
+                        select(Device).where(Device.cloud_id == device_cloud_id)
+                    )
+                ).scalar_one_or_none()
+                if device and not device.anpr_enabled:
+                    return {
+                        "success": False,
+                        "message": f"device_cloud_id={device_cloud_id} is not anpr_enabled",
+                        "device_id": device.id,
+                        "device_name": device.name,
+                    }
+
+            if device is None:
+                # Fallback: any enabled anpr_enabled device.
+                device = (
+                    await db.execute(
+                        select(Device).where(
+                            Device.enabled == True,  # noqa: E712
+                            Device.anpr_enabled == True,  # noqa: E712
+                        )
+                    )
+                ).scalars().first()
+
+            if device is None:
+                return {
+                    "success": False,
+                    "message": "no anpr_enabled device available",
+                    "device_id": None,
+                }
+
+            start = time.monotonic()
+            opened = await barrier_service.open_barrier(device)
+            latency_ms = round((time.monotonic() - start) * 1000, 2)
+
+        response = {
+            "success": opened,
+            "message": "OK" if opened else "barrier open failed (see bridge logs)",
+            "device_id": device.id,
+            "device_name": device.name,
+            "method": "alarm_out_pulse",
+            "latency_ms": latency_ms,
+            "actor": actor,
+        }
+
+        if opened:
+            from app.events.bus import event_bus
+            await event_bus.publish(
+                "barrier_opened",
+                {"device_id": device.id, "by": "cloud", "actor": actor},
+            )
 
         return response
 
