@@ -1,8 +1,14 @@
-"""Plate whitelist management routes (parking ANPR).
+"""Plate whitelist routes (parking ANPR).
 
-Phase 1: plain CRUD over the ``plate_whitelist`` table. The ANPR event
-listener and barrier control land in later phases — they will reuse
-``plate_service.normalize_plate`` so stored and recognised plates match.
+The cloud is the sole writer for the whitelist — plates are managed from
+the mobile app / CRM and propagated to bridges via WS (``plate_upsert`` /
+``plate_delete``) and the ``bootstrap_snapshot``'s ``plates`` block. The
+local bridge stores a read-only mirror so ``anpr_service`` can match in
+real time without round-tripping on every camera event.
+
+Local CRUD (POST/PUT/DELETE) is intentionally **disabled** here — those
+verbs return ``423 Locked`` with a message pointing the operator at the
+cloud-managed surface. ``GET`` endpoints stay open for debug and admin UI.
 """
 
 from __future__ import annotations
@@ -28,6 +34,14 @@ router = APIRouter(prefix="/plates", tags=["plates"])
 
 _DUPLICATE = HTTPException(
     status_code=status.HTTP_409_CONFLICT, detail="Этот номер уже в списке"
+)
+
+_CLOUD_MANAGED = HTTPException(
+    status_code=status.HTTP_423_LOCKED,
+    detail=(
+        "Номера управляются из облака — добавляйте/редактируйте через мобильное "
+        "приложение или CRM. Локальное редактирование на бридже отключено."
+    ),
 )
 
 
@@ -66,27 +80,8 @@ async def create_plate(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    data = payload.model_dump()
-    data["plate"] = _normalized_or_422(data["plate"])
-
-    plate = PlateWhitelist(**data)
-    db.add(plate)
-    try:
-        await db.flush()
-    except IntegrityError:
-        await db.rollback()
-        raise _DUPLICATE
-
-    db.add(
-        ActivityLog(
-            action=ActivityAction.PLATE_CREATED,
-            actor=current_user.username,
-            detail=f"Plate '{plate.plate}' added to whitelist",
-            success=True,
-        )
-    )
-    await db.commit()
-    return plate
+    """Cloud-managed — see module docstring. Always raises 423."""
+    raise _CLOUD_MANAGED
 
 
 @router.get("/log", response_model=PlateAccessLogListOut)
@@ -128,31 +123,8 @@ async def update_plate(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    plate = await _get_plate(db, plate_id)
-    if not plate:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plate not found")
-
-    data = payload.model_dump(exclude_unset=True)
-    if "plate" in data:
-        data["plate"] = _normalized_or_422(data["plate"])
-    for field, value in data.items():
-        setattr(plate, field, value)
-
-    db.add(
-        ActivityLog(
-            action=ActivityAction.PLATE_UPDATED,
-            actor=current_user.username,
-            detail=f"Plate id={plate_id} updated",
-            success=True,
-        )
-    )
-    try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        raise _DUPLICATE
-    await db.refresh(plate)
-    return plate
+    """Cloud-managed — see module docstring. Always raises 423."""
+    raise _CLOUD_MANAGED
 
 
 @router.delete("/{plate_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -161,17 +133,5 @@ async def delete_plate(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    plate = await _get_plate(db, plate_id)
-    if not plate:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plate not found")
-
-    db.add(
-        ActivityLog(
-            action=ActivityAction.PLATE_DELETED,
-            actor=current_user.username,
-            detail=f"Plate '{plate.plate}' (id={plate_id}) removed from whitelist",
-            success=True,
-        )
-    )
-    await db.delete(plate)
-    await db.commit()
+    """Cloud-managed — see module docstring. Always raises 423."""
+    raise _CLOUD_MANAGED

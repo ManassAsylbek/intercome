@@ -7,8 +7,13 @@ subscription open to the camera's event channel:
 
 Each recognised plate is normalised, checked against [[plate-whitelist]], and
 — if allowed — the barrier is opened via ``barrier_service``. Every pass is
-written to ``plate_access_log`` and published on the event bus as
-``plate_recognized`` (consumed by the SSE stream / cloud in phase 3).
+written to ``plate_access_log`` and emitted both ways:
+
+  * locally on the event bus as ``plate_recognized`` (consumed by the SSE
+    stream for the admin UI);
+  * upward via ``cloud_bridge.send_event("plate_recognized", ...)`` so the
+    cloud can populate the mobile «история проездов» and fire pushes like
+    «ваша машина проехала».
 
 A supervisor task re-scans the device list periodically so cameras toggled
 on/off in the admin UI are picked up without a restart.
