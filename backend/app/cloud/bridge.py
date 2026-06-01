@@ -62,6 +62,36 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Events that trigger a user-facing ring on the phone. If one sits in the send
+# queue through a long WS outage it must be dropped rather than delivered stale:
+# a call_started for a call that ended minutes ago would fire a phantom CallKit
+# ring on iOS. Non-ring events (upserts, health, etc.) are fine to deliver late.
+_RING_EVENTS = {"call_started"}
+_STALE_RING_TTL_SECONDS = 60
+
+
+def _is_stale_ring(msg: str) -> bool:
+    """True if ``msg`` is a ring-triggering event older than the TTL → drop it."""
+    try:
+        obj = json.loads(msg)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if obj.get("type") not in _RING_EVENTS:
+        return False
+    ts = obj.get("ts")
+    if not ts:
+        return False
+    try:
+        sent = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+    age = (datetime.now(timezone.utc) - sent).total_seconds()
+    if age > _STALE_RING_TTL_SECONDS:
+        logger.warning("cloud_stale_ring_dropped", type=obj.get("type"), age_seconds=round(age))
+        return True
+    return False
+
+
 def _jitter(base: float) -> float:
     """±20% jitter."""
     return base * (0.8 + random.random() * 0.4)
@@ -225,6 +255,10 @@ class CloudBridge:
     async def _send_loop(self, ws) -> None:
         while True:
             msg = await self._send_queue.get()
+            # Drop ring-triggering events that went stale during a long outage
+            # so a reconnect can't replay a call_started for a finished call.
+            if _is_stale_ring(msg):
+                continue
             await ws.send(msg)
 
     async def _health_loop(self) -> None:

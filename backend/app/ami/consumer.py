@@ -80,11 +80,18 @@ def _utcnow() -> str:
 
 
 async def _push_cloud(event_type: str, data: dict) -> None:
-    """Push event to cloud bridge if connected (non-blocking, best-effort)."""
+    """Enqueue event for cloud delivery; survives brief WS reconnects.
+
+    We enqueue unconditionally instead of gating on ``is_connected``. The send
+    queue persists across reconnects, so an event raised during a momentary WS
+    blip is delivered once the session is back — critical for ``call_started``,
+    which triggers the iOS VoIP push that wakes CallKit. A ``call_started`` left
+    sitting through a *long* outage is dropped at drain time
+    (``bridge._send_loop``) so it can never fire a phantom ring.
+    """
     try:
         from app.cloud.bridge import cloud_bridge
-        if cloud_bridge.is_connected:
-            await cloud_bridge.send_event(event_type, data)
+        await cloud_bridge.send_event(event_type, data)
     except Exception as exc:
         logger.warning("cloud_push_failed", event_type=event_type, error=str(exc))
 
@@ -104,9 +111,13 @@ async def on_dial_begin(manager, event) -> None:
         return
 
     # Deduplicate: skip if this call_id is already being tracked.
+    # Logged at INFO (not DEBUG) so we can confirm in prod that the DialBegin
+    # path is alive — it is the backup that fires call_started if the
+    # Newchannel fallback ever misses an inbound call. Seeing this line means
+    # both detection paths are working and deduping correctly by call_id.
     existing = call_store.get_active()
     if existing and existing.call_id == call_id:
-        logger.debug("ami_dial_begin_duplicate_skipped", call_id=call_id)
+        logger.info("ami_dial_begin_deduped", call_id=call_id)
         return
 
     active = call_store.on_call_started(call_id=call_id, caller=caller, callee=callee)
