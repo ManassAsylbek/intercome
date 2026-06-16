@@ -58,6 +58,10 @@ class DeviceBase(BaseModel):
     # device through the UI.
     mac_address: Optional[str] = Field(None, max_length=32)
     model: Optional[str] = Field(None, max_length=128)
+    vendor: Optional[str] = Field(
+        None, max_length=32,
+        description="Access-driver selector: 'dahua' | 'leelen' | None (generic HTTP).",
+    )
     entrance_id: Optional[int] = Field(
         None,
         description="Local FK to entrances.id. List via GET /api/entrances.",
@@ -120,6 +124,7 @@ class DeviceUpdate(BaseModel):
     notes: Optional[str] = None
     mac_address: Optional[str] = Field(None, max_length=32)
     model: Optional[str] = Field(None, max_length=128)
+    vendor: Optional[str] = Field(None, max_length=32)
     entrance_id: Optional[int] = None
     sip_enabled: Optional[bool] = None
     sip_account: Optional[str] = None
@@ -437,4 +442,21 @@ class SipApplyRequest(BaseModel):
     update_device: bool = Field(
         True,
         description="Если true — сохраняет sip_account и sip_password в записи устройства в БД",
+    )
+
+
+# ─── QR door unlock ───────────────────────────────────────────────────────────
+
+
+class QrScanRequest(BaseModel):
+    """Декодированный текст QR, прочитанный панелью (вход для QR-разблокировки).
+
+    Реальный продюсер — подписка на сканер панели — пока не реализован; этот запрос
+    используется как тестовый триггер POST /devices/{id}/qr-scan.
+    """
+    code: str = Field(..., min_length=1, max_length=512,
+                      description="Декодированный текст QR как есть, напр. DMF1:Ab12Cd34...")
+    scanned_at: Optional[str] = Field(
+        None,
+        description="ISO-8601 UTC время скана; если пусто — проставит сервер",
     )

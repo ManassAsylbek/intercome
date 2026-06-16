@@ -97,6 +97,10 @@ class Device(Base):
     # the authoritative cloud-side id we cache so we don't re-create rows.
     mac_address: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Access-integration driver selector: 'dahua' | 'leelen' | ... (None → generic
+    # HTTP-unlock default). Distinct from `model` (free-text hardware name); this
+    # picks which AccessDriver the bridge uses for open / enroll / event-stream.
+    vendor: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     entrance_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("entrances.id", ondelete="SET NULL"), nullable=True, index=True
     )

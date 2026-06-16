@@ -223,7 +223,9 @@ async def unlock_during_call(
             detail="Нет устройства с настроенным unlock",
         )
 
-    action = await unlock_service.test_unlock(door, db=db, actor=current_user.username)
+    from app.drivers import get_driver
+
+    action = await get_driver(door).open(door, kind="door", db=db, actor=current_user.username)
     await db.commit()
 
     if action.success:

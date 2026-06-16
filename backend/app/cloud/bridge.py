@@ -1378,7 +1378,9 @@ class CloudBridge:
                     "device_id": None,
                 }
 
-            action = await unlock_service.test_unlock(door, db=db, actor=actor)
+            from app.drivers import get_driver
+
+            action = await get_driver(door).open(door, kind="door", db=db, actor=actor)
             await db.commit()
 
         response: dict = {
@@ -1478,8 +1480,14 @@ class CloudBridge:
                     "device_id": None,
                 }
 
+            from app.drivers import get_driver
+
+            driver = get_driver(device)
             start = time.monotonic()
-            opened = await barrier_service.open_barrier(device)
+            opened = bool(
+                "open_barrier" in driver.capabilities()
+                and await driver.open(device, kind="barrier")
+            )
             latency_ms = round((time.monotonic() - start) * 1000, 2)
 
         response = {
