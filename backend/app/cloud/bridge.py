@@ -1510,20 +1510,21 @@ class CloudBridge:
         return response
 
     async def _cmd_reject_call(self, data: dict, **_) -> dict:
-        """Hang up EVERY channel in the call group.
+        """Hang up the call — either the whole group, or only targeted endpoints.
 
-        Previously: we Hangup'd just the originating panel channel and relied
-        on Asterisk's Dial() to auto-CANCEL its outgoing legs. Reality (seen
-        on call_id 1778680452.254): Dial() exits when the parent is hung up,
-        but in some early-media / ringing states the outgoing legs do NOT
-        receive CANCEL — the panel UA stops, but the called endpoints keep
-        ringing until their own dial-timeout. From cloud's perspective the
-        user pressed Reject and the gate keeps shouting.
+        ``data.target_endpoints`` (list of SIP extensions, e.g. ``["200064"]``)
+        scopes the reject: when present and non-empty we hang up ONLY the PJSIP
+        channels for those endpoints (typically the mobile-app leg) and leave the
+        rest — hardware monitor, panel — ringing. That is what lets an app decline
+        NOT tear down the whole call (app watchdog rejects when it can't get audio;
+        the monitor must keep ringing). Empty/missing ``target_endpoints`` keeps the
+        legacy behavior: hang up EVERY channel in the call group.
 
-        Now we enumerate all channels in the call group (matched by
-        ``Linkedid == call_id``) and issue an AMI Hangup against every one.
-        Idempotent: any leg already gone returns harmlessly. We report which
-        channels we touched so cloud can correlate with Asterisk events.
+        Channels are matched to the call group by ``Linkedid == call_id``. For the
+        legacy whole-call path Dial()'s auto-CANCEL is unreliable in early-media /
+        ringing states (the panel UA stops but called legs keep ringing to their
+        dial-timeout), so we enumerate and Hangup each leg explicitly. Idempotent:
+        a leg already gone returns harmlessly.
         """
         from app.ami.client import ami_client
 
@@ -1531,7 +1532,11 @@ class CloudBridge:
         if not call_id:
             raise RuntimeError("call_id is required")
 
-        # Find ALL channels in the call group.
+        # Optional scoping (cloud forwards reason/target_endpoints inside `data`).
+        target_set = {str(t) for t in (data.get("target_endpoints") or [])}
+        reason = data.get("reason")
+
+        # Find channels in the call group; under scoping keep only targeted ones.
         resp = await ami_client.send_action({"Action": "CoreShowChannels"})
         events = resp if isinstance(resp, list) else [resp] if resp else []
         chans_to_kill: list[str] = []
@@ -1543,10 +1548,26 @@ class CloudBridge:
             if lid != call_id and uid != call_id:
                 continue
             chan = _ami_field(ev, "Channel")
-            if chan and chan not in chans_to_kill:
+            if not chan:
+                continue
+            if target_set:
+                # 'PJSIP/200064-0000002d' -> '200064'; non-PJSIP legs never match,
+                # so the hardware monitor (and panel) are left ringing.
+                ep = chan.split("/", 1)[1].rsplit("-", 1)[0] if chan.startswith("PJSIP/") else None
+                if ep not in target_set:
+                    continue
+            if chan not in chans_to_kill:
                 chans_to_kill.append(chan)
 
         if not chans_to_kill:
+            if target_set:
+                # Targeted leg already gone (app likely sent BYE) — call continues,
+                # monitor keeps ringing. Not an error.
+                logger.info(
+                    "cloud_reject_call_targets_absent",
+                    call_id=call_id, target_endpoints=sorted(target_set), reason=reason,
+                )
+                return {"success": True, "call_id": call_id, "scoped": True, "channels": []}
             raise RuntimeError("channel_gone")
 
         # Hangup each leg explicitly. Partial errors are non-fatal — a leg
@@ -1594,12 +1615,16 @@ class CloudBridge:
         logger.info(
             "cloud_reject_call_dispatched",
             call_id=call_id,
+            scoped=bool(target_set),
+            target_endpoints=sorted(target_set) if target_set else None,
+            reason=reason,
             channels=[r["channel"] for r in hangup_results],
             results=hangup_results,
         )
         return {
             "success": True,
             "call_id": call_id,
+            "scoped": bool(target_set),
             "channels": [r["channel"] for r in hangup_results],
             "hangup_results": hangup_results,
         }
