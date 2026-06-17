@@ -10,7 +10,10 @@ export function WebRTCPlayer({ src }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const pc = new RTCPeerConnection({ bundlePolicy: "max-bundle" });
+    const pc = new RTCPeerConnection({
+      bundlePolicy: "max-bundle",
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
 
     pc.ontrack = ({ streams }) => {
       if (videoRef.current && streams[0]) {

@@ -54,6 +54,14 @@ export interface Device {
   web_port: number | null;
   enabled: boolean;
   notes: string | null;
+  // Cloud mirror
+  mac_address: string | null;
+  model: string | null;
+  entrance_id: number | null;
+  cloud_id: number | null;
+  cloud_synced: boolean;
+  last_cloud_sync_error: string | null;
+  // SIP
   sip_enabled: boolean;
   sip_account: string | null;
   sip_password: string | null;
@@ -62,11 +70,13 @@ export interface Device {
   sip_proxy: string | null;
   rtsp_enabled: boolean;
   rtsp_url: string | null;
+  anpr_enabled: boolean;
   unlock_enabled: boolean;
   unlock_method: UnlockMethod;
   unlock_url: string | null;
   unlock_username: string | null;
   unlock_password: string | null;
+  apartment_id: number | null;
   is_online: boolean | null;
   last_seen: string | null;
   created_at: string;
@@ -75,8 +85,18 @@ export interface Device {
 
 export type DeviceCreate = Omit<
   Device,
-  "id" | "is_online" | "last_seen" | "created_at" | "updated_at"
->;
+  | "id"
+  | "cloud_id"
+  | "cloud_synced"
+  | "last_cloud_sync_error"
+  | "is_online"
+  | "last_seen"
+  | "created_at"
+  | "updated_at"
+> & {
+  // entrance_id is required on create (backend validates 422 otherwise).
+  entrance_id: number;
+};
 export type DeviceUpdate = Partial<DeviceCreate>;
 
 export interface DeviceListOut {
@@ -110,6 +130,45 @@ export type RoutingRuleUpdate = Partial<RoutingRuleCreate>;
 
 export interface RoutingRuleListOut {
   items: RoutingRule[];
+  total: number;
+}
+
+// ─── Plate whitelist (parking ANPR) ───────────────────────────────────────────
+
+export interface Plate {
+  id: number;
+  plate: string;
+  owner_name: string | null;
+  apartment_id: number | null;
+  entrance_id: number | null;
+  enabled: boolean;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type PlateCreate = Omit<Plate, "id" | "created_at" | "updated_at">;
+export type PlateUpdate = Partial<PlateCreate>;
+
+export interface PlateListOut {
+  items: Plate[];
+  total: number;
+}
+
+export interface PlateAccessLog {
+  id: number;
+  device_id: number | null;
+  plate: string;
+  plate_raw: string | null;
+  matched: boolean;
+  whitelist_id: number | null;
+  action: string;
+  detail: string | null;
+  created_at: string;
+}
+
+export interface PlateAccessLogListOut {
+  items: PlateAccessLog[];
   total: number;
 }
 
@@ -188,11 +247,34 @@ export interface ApartmentMonitor {
   id: number;
   sip_account: string;
   label: string | null;
+  mac_address: string | null;
+  model: string | null;
+  name: string | null;
+  cloud_id: number | null;
 }
 
 export interface ApartmentMonitorIn {
   sip_account: string;
-  label: string | null;
+  label?: string | null;
+  mac_address?: string | null;
+  model?: string | null;
+  name?: string | null;
+}
+
+export interface Entrance {
+  id: number;
+  cloud_id: number;
+  number: string;
+  building_id: number | null;
+  building_address: string | null;
+}
+
+export interface ApartmentSourceDevice {
+  id: number;
+  name: string;
+  device_type: DeviceType;
+  sip_account: string | null;
+  enabled: boolean;
 }
 
 export interface Apartment {
@@ -201,7 +283,15 @@ export interface Apartment {
   call_code: string;
   notes: string | null;
   enabled: boolean;
+  floor: number | null;
+  entrance_id: number | null;
+  cloud_id: number | null;
+  cloud_synced: boolean;
+  last_cloud_sync_error: string | null;
+  cloud_relay_enabled: boolean;
+  cloud_sip_account: string | null;
   monitors: ApartmentMonitor[];
+  source_devices: ApartmentSourceDevice[];
   created_at: string;
   updated_at: string;
 }
@@ -211,6 +301,11 @@ export interface ApartmentCreate {
   call_code: string;
   notes?: string | null;
   enabled: boolean;
+  floor?: number | null;
+  // Required by backend — pick from GET /api/entrances.
+  entrance_id: number;
+  cloud_relay_enabled: boolean;
+  cloud_sip_account?: string | null;
   monitors: ApartmentMonitorIn[];
 }
 

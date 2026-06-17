@@ -48,6 +48,21 @@ async def test_unlock(
                     success=False, message=f"Unsupported unlock method: {device.unlock_method}"
                 )
 
+            # Dahua VTO (and some other panels) reject Basic and require Digest.
+            # If we got a 401 with a Digest challenge and have credentials, retry.
+            # Leelen path (no creds) never enters this branch — behavior preserved.
+            if (
+                response.status_code == 401
+                and device.unlock_username
+                and device.unlock_password
+                and "digest" in response.headers.get("www-authenticate", "").lower()
+            ):
+                digest_auth = httpx.DigestAuth(device.unlock_username, device.unlock_password)
+                if device.unlock_method == UnlockMethod.HTTP_GET:
+                    response = await client.get(device.unlock_url, auth=digest_auth)
+                else:
+                    response = await client.post(device.unlock_url, auth=digest_auth)
+
         latency_ms = (time.monotonic() - start) * 1000
         success = response.status_code < 400
 

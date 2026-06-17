@@ -43,10 +43,22 @@ async def get_devices(
     return list(devices), total
 
 
+def _derive_vendor(device: Device) -> None:
+    """Best-effort vendor inference so a Dahua ANPR camera / barrier added without
+    an explicit vendor still routes to the DahuaDriver (and can open its barrier).
+    Only fills a NULL vendor — never overrides an admin-set value. Mirrors the P1
+    migration backfill heuristic (anpr_enabled OR a /cgi-bin/ unlock_url)."""
+    if device.vendor:
+        return
+    if device.anpr_enabled or "/cgi-bin/" in (device.unlock_url or ""):
+        device.vendor = "dahua"
+
+
 async def create_device(db: AsyncSession, data: DeviceCreate, actor: str = "system") -> Device:
     from app.models import ActivityLog
 
     device = Device(**data.model_dump())
+    _derive_vendor(device)
     db.add(device)
     await db.flush()
 
@@ -59,6 +71,9 @@ async def create_device(db: AsyncSession, data: DeviceCreate, actor: str = "syst
     )
     db.add(log)
     await db.flush()
+
+    # NB: go2rtc.write_config() runs in the route AFTER db.commit() — it opens
+    # its own session and would not see this still-uncommitted row otherwise.
     return device
 
 
@@ -70,6 +85,7 @@ async def update_device(
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(device, field, value)
+    _derive_vendor(device)
 
     log = ActivityLog(
         action=ActivityAction.DEVICE_UPDATED,
@@ -80,19 +96,28 @@ async def update_device(
     )
     db.add(log)
     await db.flush()
+
+    # NB: go2rtc.write_config() runs in the route AFTER db.commit() so the
+    # fresh-session rebuild sees the updated row. write_config() is a full
+    # rebuild from the DB, so it covers both added and removed RTSP streams.
     return device
 
 
 async def delete_device(db: AsyncSession, device: Device, actor: str = "system") -> None:
     from app.models import ActivityLog
 
+    device_id = device.id
+
     log = ActivityLog(
         action=ActivityAction.DEVICE_DELETED,
         actor=actor,
         device_id=None,
-        detail=f"Device '{device.name}' (id={device.id}) deleted",
+        detail=f"Device '{device.name}' (id={device_id}) deleted",
         success=True,
     )
     db.add(log)
     await db.delete(device)
     await db.flush()
+
+    # NB: go2rtc.write_config() runs in the route AFTER db.commit() — a
+    # fresh-session rebuild before commit would still see the deleted row.

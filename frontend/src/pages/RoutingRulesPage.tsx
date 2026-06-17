@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useForm, type SubmitHandler } from "react-hook-form";
+import { useState, useEffect } from "react";
+import { useForm, useWatch, type SubmitHandler } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import {
@@ -20,7 +20,14 @@ import { Plus, Pencil, Trash2, GitFork } from "lucide-react";
 
 const schema = z.object({
   name: z.string().min(1, "Name is required"),
-  call_code: z.string().min(1, "Call code is required"),
+  // call_code это SIP extension — должен быть только цифрами (1001, 200001).
+  // SIP технически допускает alphanumeric, но в нашей системе все коды
+  // числовые, а буквы в этом поле почти всегда означают опечатку.
+  call_code: z
+    .string()
+    .min(1, "Код вызова обязателен")
+    .max(16, "Слишком длинный код")
+    .regex(/^\d+$/, "Только цифры (например 1001)"),
   source_device_id: z.coerce.number().nullable().optional(),
   target_device_id: z.coerce.number().nullable().optional(),
   target_sip_account: z.string().nullable().optional(),
@@ -49,10 +56,14 @@ function RuleFormModal({
     register,
     handleSubmit,
     reset,
+    control,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<FormData>({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     resolver: zodResolver(schema) as any,
+    mode: "onBlur",
+    reValidateMode: "onChange",
     defaultValues: rule
       ? {
           ...rule,
@@ -61,6 +72,42 @@ function RuleFormModal({
         }
       : { enabled: true, priority: 0 },
   });
+
+  // useForm's defaultValues only initialise on first mount. Closing the modal
+  // doesn't remount the form, so values persist into the next open. Reset
+  // explicitly whenever the modal opens (or the row being edited changes).
+  useEffect(() => {
+    if (!open) return;
+    if (rule) {
+      reset({
+        ...rule,
+        source_device_id: rule.source_device_id ?? undefined,
+        target_device_id: rule.target_device_id ?? undefined,
+      });
+    } else {
+      reset({
+        name: "",
+        call_code: "",
+        source_device_id: undefined,
+        target_device_id: undefined,
+        target_sip_account: "",
+        enabled: true,
+        priority: 0,
+        notes: "",
+      });
+    }
+  }, [open, rule, reset]);
+
+  const watchedTargetDeviceId = useWatch({ control, name: "target_device_id" });
+
+  useEffect(() => {
+    const id = Number(watchedTargetDeviceId);
+    if (!id) return;
+    const device = devices.find((d) => d.id === id);
+    if (device?.sip_enabled && device?.sip_account) {
+      setValue("target_sip_account", device.sip_account);
+    }
+  }, [watchedTargetDeviceId, devices, setValue]);
 
   const onSubmit = async (data: FormData) => {
     try {
@@ -99,14 +146,17 @@ function RuleFormModal({
         />
         <Input
           label="Код вызова"
-          placeholder="101"
-          hint="Код набора, который запускает это правило"
+          placeholder="1001"
+          hint="Только цифры. Номер экстеншна, который набирает устройство-источник (например дверная панель)."
+          inputMode="numeric"
+          pattern="[0-9]*"
           {...register("call_code")}
           error={errors.call_code?.message}
         />
 
         <Select
           label="Устройство-источник (необязательно)"
+          hint="Кто инициирует звонок (дверная панель и т.п.)"
           {...register("source_device_id")}
         >
           <option value="">— Любой —</option>
@@ -118,21 +168,24 @@ function RuleFormModal({
         </Select>
 
         <Select
-          label="Целевое устройство (необязательно)"
+          label="Целевое устройство"
+          hint="Кому доставить звонок — SIP-аккаунт заполнится автоматически"
           {...register("target_device_id")}
         >
           <option value="">— Без целевого устройства —</option>
-          {devices.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name} ({DEVICE_TYPE_LABELS[d.device_type]})
-            </option>
-          ))}
+          {devices
+            .filter((d) => d.sip_enabled && d.sip_account)
+            .map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} ({DEVICE_TYPE_LABELS[d.device_type]}) — {d.sip_account}
+              </option>
+            ))}
         </Select>
 
         <Input
-          label="Целевой SIP-аккаунт (необязательно)"
-          placeholder="sip:home001@192.168.31.132"
-          hint="Используется при маршрутизации на SIP URI"
+          label="SIP-аккаунт получателя"
+          placeholder="1001"
+          hint="Номер аккаунта в Asterisk (заполняется автоматически при выборе устройства)"
           {...register("target_sip_account")}
         />
 

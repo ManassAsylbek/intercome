@@ -46,6 +46,27 @@ class DeviceBase(BaseModel):
     enabled: bool = True
     notes: Optional[str] = None
 
+    # Cloud mirror inputs (admin enters MAC, picks an entrance from
+    # /api/entrances). Cloud-side IDs come back via ack and live in DeviceOut.
+    #
+    # NOTE: entrance_id is Optional in *Base* so that DeviceOut (which inherits
+    # from DeviceBase via SQLAlchemy rows) can serialise legacy devices that
+    # were created before we added entrance support — they have entrance_id=
+    # NULL in the DB and would otherwise blow up `GET /api/devices` with a
+    # pydantic ValidationError. The requirement is re-imposed on
+    # DeviceCreate so admins must still pick an entrance when adding a new
+    # device through the UI.
+    mac_address: Optional[str] = Field(None, max_length=32)
+    model: Optional[str] = Field(None, max_length=128)
+    vendor: Optional[str] = Field(
+        None, max_length=32,
+        description="Access-driver selector: 'dahua' | 'leelen' | None (generic HTTP).",
+    )
+    entrance_id: Optional[int] = Field(
+        None,
+        description="Local FK to entrances.id. List via GET /api/entrances.",
+    )
+
     # SIP
     sip_enabled: bool = False
     sip_account: Optional[str] = None
@@ -58,6 +79,9 @@ class DeviceBase(BaseModel):
     rtsp_enabled: bool = False
     rtsp_url: Optional[str] = None
 
+    # ANPR / parking barrier
+    anpr_enabled: bool = False
+
     # Unlock
     unlock_enabled: bool = False
     unlock_method: UnlockMethod = UnlockMethod.NONE
@@ -65,9 +89,30 @@ class DeviceBase(BaseModel):
     unlock_username: Optional[str] = None
     unlock_password: Optional[str] = None
 
+    # Apartment link (for source devices: door panels, gates, barriers)
+    apartment_id: Optional[int] = None
+
+    @field_validator("apartment_id", mode="before")
+    @classmethod
+    def _blank_apartment_to_none(cls, v: object) -> object:
+        """Treat 0 / "" (UI "no apartment" sentinel) as NULL.
+
+        The device form's empty <Select> option submits "" which the client
+        coerces to 0; 0 is not a real apartments.id, so without this the
+        INSERT fails a FK constraint and surfaces as a raw 500.
+        """
+        if v in (0, "0", ""):
+            return None
+        return v
+
 
 class DeviceCreate(DeviceBase):
-    pass
+    # Re-impose entrance_id as required: admin MUST pick one when creating a
+    # new device, otherwise it can't be mirrored to cloud.
+    entrance_id: int = Field(
+        ...,
+        description="Local FK to entrances.id. List via GET /api/entrances.",
+    )
 
 
 class DeviceUpdate(BaseModel):
@@ -77,6 +122,10 @@ class DeviceUpdate(BaseModel):
     web_port: Optional[int] = Field(None, ge=1, le=65535)
     enabled: Optional[bool] = None
     notes: Optional[str] = None
+    mac_address: Optional[str] = Field(None, max_length=32)
+    model: Optional[str] = Field(None, max_length=128)
+    vendor: Optional[str] = Field(None, max_length=32)
+    entrance_id: Optional[int] = None
     sip_enabled: Optional[bool] = None
     sip_account: Optional[str] = None
     sip_password: Optional[str] = None
@@ -85,15 +134,28 @@ class DeviceUpdate(BaseModel):
     sip_proxy: Optional[str] = None
     rtsp_enabled: Optional[bool] = None
     rtsp_url: Optional[str] = None
+    anpr_enabled: Optional[bool] = None
     unlock_enabled: Optional[bool] = None
     unlock_method: Optional[UnlockMethod] = None
     unlock_url: Optional[str] = None
     unlock_username: Optional[str] = None
     unlock_password: Optional[str] = None
+    apartment_id: Optional[int] = None
+
+    @field_validator("apartment_id", mode="before")
+    @classmethod
+    def _blank_apartment_to_none(cls, v: object) -> object:
+        """See DeviceBase._blank_apartment_to_none — same 0/"" → NULL guard."""
+        if v in (0, "0", ""):
+            return None
+        return v
 
 
 class DeviceOut(DeviceBase):
     id: int
+    cloud_id: Optional[int] = None
+    cloud_synced: bool = False
+    last_cloud_sync_error: Optional[str] = None
     is_online: Optional[bool] = None
     last_seen: Optional[datetime] = None
     created_at: datetime
@@ -151,18 +213,82 @@ class RoutingRuleListOut(BaseModel):
     total: int
 
 
+# ─── Plate whitelist (parking ANPR) ──────────────────────────────────────────
+
+
+class PlateBase(BaseModel):
+    plate: str = Field(..., min_length=1, max_length=16)
+    owner_name: Optional[str] = Field(None, max_length=128)
+    apartment_id: Optional[int] = None
+    entrance_id: Optional[int] = None
+    enabled: bool = True
+    notes: Optional[str] = None
+
+
+class PlateCreate(PlateBase):
+    pass
+
+
+class PlateUpdate(BaseModel):
+    plate: Optional[str] = Field(None, min_length=1, max_length=16)
+    owner_name: Optional[str] = Field(None, max_length=128)
+    apartment_id: Optional[int] = None
+    entrance_id: Optional[int] = None
+    enabled: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class PlateOut(PlateBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PlateListOut(BaseModel):
+    items: list[PlateOut]
+    total: int
+
+
+class PlateAccessLogOut(BaseModel):
+    id: int
+    device_id: Optional[int] = None
+    plate: str
+    plate_raw: Optional[str] = None
+    matched: bool
+    whitelist_id: Optional[int] = None
+    action: str
+    detail: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PlateAccessLogListOut(BaseModel):
+    items: list[PlateAccessLogOut]
+    total: int
+
+
 # ─── Apartment ────────────────────────────────────────────────────────────────
 
 
 class ApartmentMonitorIn(BaseModel):
     sip_account: str = Field(..., min_length=1, max_length=128)
     label: Optional[str] = Field(None, max_length=128)
+    mac_address: Optional[str] = Field(None, max_length=32)
+    model: Optional[str] = Field(None, max_length=128)
+    name: Optional[str] = Field(None, max_length=128)
 
 
 class ApartmentMonitorOut(BaseModel):
     id: int
     sip_account: str
     label: Optional[str] = None
+    mac_address: Optional[str] = None
+    model: Optional[str] = None
+    name: Optional[str] = None
+    cloud_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
@@ -172,6 +298,16 @@ class ApartmentCreate(BaseModel):
     call_code: str = Field(..., min_length=1, max_length=64)
     notes: Optional[str] = None
     enabled: bool = True
+    floor: Optional[int] = None
+    # Required: pick from GET /api/entrances. Without it the apartment will
+    # never be mirrored to cloud — better to fail fast at validation than to
+    # leave a stale local-only row that admin doesn't realize is broken.
+    entrance_id: int = Field(
+        ...,
+        description="Local FK to entrances.id. List available entrances via GET /api/entrances.",
+    )
+    cloud_relay_enabled: bool = False
+    cloud_sip_account: Optional[str] = Field(None, max_length=128)
     monitors: list[ApartmentMonitorIn] = []
 
 
@@ -180,7 +316,21 @@ class ApartmentUpdate(BaseModel):
     call_code: Optional[str] = Field(None, min_length=1, max_length=64)
     notes: Optional[str] = None
     enabled: Optional[bool] = None
+    floor: Optional[int] = None
+    entrance_id: Optional[int] = None
+    cloud_relay_enabled: Optional[bool] = None
+    cloud_sip_account: Optional[str] = Field(None, max_length=128)
     monitors: Optional[list[ApartmentMonitorIn]] = None
+
+
+class ApartmentSourceDeviceOut(BaseModel):
+    id: int
+    name: str
+    device_type: DeviceType
+    sip_account: Optional[str] = None
+    enabled: bool
+
+    model_config = {"from_attributes": True}
 
 
 class ApartmentOut(BaseModel):
@@ -189,9 +339,27 @@ class ApartmentOut(BaseModel):
     call_code: str
     notes: Optional[str] = None
     enabled: bool
+    floor: Optional[int] = None
+    entrance_id: Optional[int] = None
+    cloud_id: Optional[int] = None
+    cloud_synced: bool = False
+    last_cloud_sync_error: Optional[str] = None
+    cloud_relay_enabled: bool = False
+    cloud_sip_account: Optional[str] = None
     monitors: list[ApartmentMonitorOut] = []
+    source_devices: list[ApartmentSourceDeviceOut] = []
     created_at: datetime
     updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class EntranceOut(BaseModel):
+    id: int
+    cloud_id: int
+    number: str
+    building_id: Optional[int] = None
+    building_address: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -274,4 +442,21 @@ class SipApplyRequest(BaseModel):
     update_device: bool = Field(
         True,
         description="Если true — сохраняет sip_account и sip_password в записи устройства в БД",
+    )
+
+
+# ─── QR door unlock ───────────────────────────────────────────────────────────
+
+
+class QrScanRequest(BaseModel):
+    """Декодированный текст QR, прочитанный панелью (вход для QR-разблокировки).
+
+    Реальный продюсер — подписка на сканер панели — пока не реализован; этот запрос
+    используется как тестовый триггер POST /devices/{id}/qr-scan.
+    """
+    code: str = Field(..., min_length=1, max_length=512,
+                      description="Декодированный текст QR как есть, напр. DMF1:Ab12Cd34...")
+    scanned_at: Optional[str] = Field(
+        None,
+        description="ISO-8601 UTC время скана; если пусто — проставит сервер",
     )

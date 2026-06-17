@@ -29,10 +29,14 @@ SIP / Asterisk integration service.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 import socket
 import subprocess
+import tempfile
 import time
+from typing import Optional
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -40,7 +44,7 @@ from app.schemas import ActionResult
 
 logger = get_logger(__name__)
 
-# ─── Шаблон блока ─────────────────────────────────────────────────────────────
+# ─── Шаблон блока pjsip.conf ──────────────────────────────────────────────────
 
 _BLOCK_START = "; === managed by intercom-server: {acct} ==="
 _BLOCK_END   = "; === end managed {acct} ==="
@@ -53,12 +57,26 @@ context=intercom
 disallow=all
 allow=alaw
 allow=ulaw
+; video — door panels / indoor monitors are video intercoms; without a
+; video codec in the allow-list Asterisk strips the video stream and the
+; call connects audio-only. h264 is the standard for Dahua/Hikvision.
+allow=h264
 auth=auth{acct}
 aors={acct}
 direct_media=no
 rtp_symmetric=yes
 force_rport=yes
 ice_support=no
+rewrite_contact=yes
+media_use_received_transport=yes
+dtmf_mode=rfc4733
+rtcp_mux=no
+allow_transfer=no
+send_rpid=yes
+trust_id_inbound=yes
+rtp_timeout=30
+rtp_timeout_hold=60
+transport=transport-udp
 
 [auth{acct}]
 type=auth
@@ -70,8 +88,68 @@ password={password}
 type=aor
 max_contacts=2
 remove_existing=yes
+qualify_frequency=0
 ; === end managed {acct} ===
 """
+
+# ─── Шаблон блока extensions.conf ────────────────────────────────────────────
+
+_EXT_BLOCK_START = "; === managed extension: {acct} ==="
+_EXT_BLOCK_END   = "; === end extension: {acct} ==="
+
+_EXT_BLOCK_TMPL = """\
+; === managed extension: {acct} ===
+exten => {acct},1,NoOp(Incoming call to {acct} from ${{CALLERID(num)}})
+exten => {acct},n,Set(CALL_UID=${{UNIQUEID}})
+exten => {acct},n,Set(UNUSED=${{CURL(http://127.0.0.1:8000/api/webhooks/asterisk?event=call_start&caller=${{CALLERID(num)}}&callee={acct}&call_id=${{CALL_UID}})}})
+exten => {acct},n,Set(JITTERBUFFER(adaptive)=default)
+exten => {acct},n,Dial(PJSIP/1099&PJSIP/{acct},60,g)
+exten => {acct},n,Set(UNUSED=${{CURL(http://127.0.0.1:8000/api/webhooks/asterisk?event=call_end&caller=${{CALLERID(num)}}&call_id=${{CALL_UID}})}})
+exten => {acct},n,Hangup()
+; === end extension: {acct} ===
+"""
+
+
+def _ext_apply_to_text(text: str, acct: str) -> str:
+    """Добавляет управляемый блок расширения если его ещё нет в extensions.conf."""
+    start_marker = _EXT_BLOCK_START.format(acct=acct)
+    if start_marker in text:
+        return text  # уже есть — не трогаем
+    block = _EXT_BLOCK_TMPL.format(acct=acct)
+    return text.rstrip("\n") + "\n\n" + block + "\n"
+
+
+def _apply_extension_to_conf(acct: str) -> ActionResult:
+    """Добавляет экстеншн для аккаунта в extensions.conf если его нет."""
+    conf = settings.asterisk_extensions_conf
+    try:
+        with open(conf, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception as exc:
+        return ActionResult(success=False, message=f"Не могу прочитать {conf}", detail=str(exc))
+
+    if _EXT_BLOCK_START.format(acct=acct) in text:
+        return ActionResult(success=True, message=f"Экстеншн {acct} уже есть в extensions.conf")
+
+    new_text = _ext_apply_to_text(text, acct)
+    try:
+        with open(conf, "w", encoding="utf-8") as f:
+            f.write(new_text)
+    except Exception as exc:
+        return ActionResult(success=False, message=f"Не могу записать {conf}", detail=str(exc))
+
+    # Reload dialplan via docker exec
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "intercom-asterisk", "asterisk", "-rx", "dialplan reload"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return ActionResult(success=True, message=f"Экстеншн {acct} добавлен в extensions.conf, dialplan перезагружен")
+        return ActionResult(success=True, message=f"Экстеншн {acct} добавлен в extensions.conf (dialplan reload не удался)")
+    except Exception:
+        return ActionResult(success=True, message=f"Экстеншн {acct} добавлен в extensions.conf")
+
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -192,6 +270,38 @@ def reload_asterisk_ami(commands: list[str] | None = None) -> ActionResult:
     return ActionResult(success=True, message="Asterisk перезагружен через AMI")
 
 
+def _reload_via_docker_exec() -> tuple[bool, str]:
+    """Reload Asterisk via 'docker exec' — works in Docker Compose setup."""
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "intercom-asterisk", "asterisk", "-rx", "module reload res_pjsip.so"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip() or "OK"
+        return False, result.stderr.strip() or f"exit code {result.returncode}"
+    except FileNotFoundError:
+        return False, "docker CLI not found"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _reload_via_docker_exec_dialplan() -> tuple[bool, str]:
+    """Reload dialplan via 'docker exec'."""
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "intercom-asterisk", "asterisk", "-rx", "dialplan reload"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip() or "OK"
+        return False, result.stderr.strip() or f"exit code {result.returncode}"
+    except FileNotFoundError:
+        return False, "docker CLI not found"
+    except Exception as exc:
+        return False, str(exc)
+
+
 # ─── Transport ────────────────────────────────────────────────────────────────
 
 
@@ -227,16 +337,27 @@ def _apply_local(acct: str, password: str) -> ActionResult:
             detail="sudo chmod a+rw /etc/asterisk/pjsip.conf  — или запустите от root",
         )
 
-    ok, msg = _reload_local(reload_cmd)
-    if ok:
+    # Try configured reload command first (if set)
+    if reload_cmd:
+        ok, msg = _reload_local(reload_cmd)
+        if ok:
+            return ActionResult(
+                success=True,
+                message=f"pjsip.conf обновлён, Asterisk перезагружен (аккаунт {acct})",
+            )
+        logger.warning("local_reload_cmd_failed_trying_docker_exec", cmd=reload_cmd, error=msg)
+
+    # Fallback: docker exec (backend has /var/run/docker.sock mounted)
+    ok2, msg2 = _reload_via_docker_exec()
+    if ok2:
         return ActionResult(
             success=True,
-            message=f"pjsip.conf обновлён, Asterisk перезагружен (аккаунт {acct})",
+            message=f"pjsip.conf обновлён, Asterisk перезагружен через docker exec (аккаунт {acct})",
         )
     return ActionResult(
         success=False,
         message="pjsip.conf обновлён, но перезагрузка Asterisk не удалась",
-        detail=msg,
+        detail=f"reload_cmd: {msg if reload_cmd else 'not set'} | docker exec: {msg2}",
     )
 
 
@@ -263,10 +384,18 @@ def _apply_local_ami(acct: str, password: str) -> ActionResult:
             success=True,
             message=f"pjsip.conf обновлён, Asterisk перезагружен через AMI (аккаунт {acct})",
         )
+    logger.warning("ami_reload_failed_trying_docker_exec", ami_error=msg)
+    # Fallback: docker exec (backend has /var/run/docker.sock mounted)
+    ok2, msg2 = _reload_via_docker_exec()
+    if ok2:
+        return ActionResult(
+            success=True,
+            message=f"pjsip.conf обновлён, Asterisk перезагружен через docker exec (аккаунт {acct})",
+        )
     return ActionResult(
         success=False,
-        message="pjsip.conf обновлён, но перезагрузка через AMI не удалась",
-        detail=msg,
+        message="pjsip.conf обновлён, но перезагрузка Asterisk не удалась",
+        detail=f"AMI: {msg} | docker exec: {msg2}",
     )
 
 
@@ -341,6 +470,13 @@ class SIPService:
         """
         Обновляет (или создаёт) SIP-аккаунт в pjsip.conf и перезагружает Asterisk.
         Режим определяется ASTERISK_MODE в .env: 'local', 'ssh' или 'ami'.
+
+        Раньше здесь дописывался legacy "managed extension" блок в
+        extensions.conf через _apply_extension_to_conf — мы это убрали:
+        дозвоны на номера квартир маршрутизируются через
+        ``[intercom-apartments]`` (auto-generated из apartment_monitors),
+        включаемый одним ``include`` из ``[intercom]``. Legacy-вписывание
+        в extensions.conf затирало этот include и ломало маршрут.
         """
         logger.info("sip_apply_credentials", acct=acct, mode=settings.asterisk_mode)
         if settings.asterisk_mode == "ssh":
@@ -355,21 +491,6 @@ class SIPService:
             "status": "not_configured",
             "message": "Asterisk AMI polling not yet implemented",
         }
-
-    async def originate_call(self, from_account: str, to_account: str) -> ActionResult:
-        logger.info("sip_originate_stub", from_account=from_account, to_account=to_account)
-        return ActionResult(
-            success=False,
-            message="SIP call origination not yet implemented",
-            detail="Configure Asterisk AMI connection first",
-        )
-
-    async def send_dtmf_unlock(self, device, dtmf_code: str = "#") -> ActionResult:
-        return ActionResult(
-            success=False,
-            message="SIP DTMF unlock not yet implemented",
-            detail="Requires active Asterisk AMI session",
-        )
 
     async def health_check(self) -> dict:
         mode = settings.asterisk_mode
@@ -398,23 +519,30 @@ class SIPService:
 
     def generate_extensions_conf(
         self,
-        rules_by_code: dict[str, list[str]],
+        apartments: list[dict],
         backend_url: str = "http://127.0.0.1:8000",
     ) -> ActionResult:
         """
-        Генерирует extensions.conf из словаря:
-            { "1001": ["1099", "1001", "1003"], "1002": ["1099", "1002"] }
-        Каждый call_code становится extension'ом, все target_sip_accounts
-        набираются одновременно через Dial(PJSIP/a&PJSIP/b&...).
-
-        Браузер (1099) добавляется автоматически если его нет в списке.
+        Генерирует extensions.conf из списка квартир:
+            apartments = [
+                {
+                    "call_code": "1042",
+                    "monitors": ["1001", "1003"],      # SIP-аккаунты мониторов
+                    "cloud_relay_enabled": True,
+                    "cloud_sip_account": "1042",       # аккаунт на облачном транке
+                },
+                ...
+            ]
+        Каждая квартира → один extension.
+        Dial: PJSIP/1099 (браузер) + все мониторы + облако (если включено).
         """
         conf_path = settings.asterisk_extensions_conf
+        cloud_trunk = settings.cloud_sip_trunk_endpoint
         lines: list[str] = []
 
         lines.append("; ─── Intercom dialplan — generated by intercom-server ─────────────────────────")
         lines.append("; DO NOT EDIT MANUALLY — изменения перезапишутся автоматически.")
-        lines.append("; Управляйте правилами через веб-интерфейс → Routing Rules.")
+        lines.append("; Управляйте квартирами через веб-интерфейс → Квартиры.")
         lines.append("")
         lines.append("[general]")
         lines.append("static=yes")
@@ -422,13 +550,24 @@ class SIPService:
         lines.append("")
         lines.append("[intercom]")
 
-        for call_code, accounts in sorted(rules_by_code.items()):
-            # Браузер всегда в списке
-            dial_accounts = list(dict.fromkeys(["1099"] + accounts))  # уникальные, браузер первый
-            dial_str = "&".join(f"PJSIP/{a}" for a in dial_accounts)
+        for apt in sorted(apartments, key=lambda a: a["call_code"]):
+            call_code = apt["call_code"]
+            monitors = apt.get("monitors", [])
+            cloud_enabled = apt.get("cloud_relay_enabled", False)
+            cloud_acct = apt.get("cloud_sip_account") or call_code
 
-            lines.append(f"")
-            lines.append(f"; === call_code {call_code}: ring {', '.join(dial_accounts)} ===")
+            # Build dial targets: browser + monitors + cloud
+            dial_parts = list(dict.fromkeys(["1099"] + monitors))
+            if cloud_enabled and cloud_trunk:
+                dial_parts.append(f"{cloud_acct}@{cloud_trunk}")
+
+            dial_str = "&".join(
+                f"PJSIP/{p}" if "@" not in p else f"PJSIP/{p}"
+                for p in dial_parts
+            )
+
+            lines.append("")
+            lines.append(f"; === Квартира {call_code}: {', '.join(dial_parts)} ===")
             lines.append(f"exten => {call_code},1,NoOp(Incoming call to {call_code} from ${{CALLERID(num)}})")
             lines.append(f"exten => {call_code},n,Set(CALL_UID=${{UNIQUEID}})")
             lines.append(f"exten => {call_code},n,Set(UNUSED=${{CURL({backend_url}/api/webhooks/asterisk?event=call_start&caller=${{CALLERID(num)}}&callee={call_code}&call_id=${{CALL_UID}})}})")
@@ -456,23 +595,299 @@ class SIPService:
         except Exception as exc:
             return ActionResult(success=False, message="Ошибка записи extensions.conf", detail=str(exc))
 
-        # Reload dialplan via AMI or local
-        if settings.asterisk_mode == "ami":
-            ok, msg = _reload_via_ami()
-        else:
-            ok, msg = _reload_local("asterisk -rx 'dialplan reload'")
-
+        # Reload dialplan
+        ok, msg = _reload_via_docker_exec_dialplan()
         if ok:
             return ActionResult(
                 success=True,
-                message=f"extensions.conf сгенерирован ({len(rules_by_code)} extension(s)), dialplan перезагружен",
+                message=f"extensions.conf сгенерирован ({len(apartments)} квартир), dialplan перезагружен",
             )
         return ActionResult(
             success=False,
-            message="extensions.conf записан, но dialplan reload не удался — перезапустите Asterisk вручную",
+            message="extensions.conf записан, но dialplan reload не удался",
             detail=msg,
         )
 
 
 # Module-level singleton
 sip_service = SIPService()
+
+
+# ─── pjsip_webrtc.conf management ────────────────────────────────────────────
+
+_WEBRTC_BLOCK_TMPL = """\
+; === webrtc: {ext} ===
+[{ext}]
+type=endpoint
+transport=transport-ws
+aors={ext}
+auth={ext}
+context=from-internal
+disallow=all
+allow=opus,ulaw,alaw
+; webrtc=yes implies: rtcp_mux + use_avpf + ice_support + media_use_received_transport
+webrtc=yes
+use_avpf=yes
+media_encryption=dtls
+dtls_verify=fingerprint
+dtls_setup=actpass
+ice_support=yes
+media_use_received_transport=yes
+rtcp_mux=yes
+; --- WebRTC over NAT must NOT use these Asterisk defaults: ---
+; direct_media=true would force peer-to-peer RTP between the panel (plain UDP)
+; and the WebRTC client (DTLS-SRTP) — they cannot talk directly. Asterisk has
+; to stay in the media path and bridge SRTP↔RTP.
+direct_media=no
+; rewrite_contact=true makes Asterisk replace the Contact URI (which a SIP.js
+; client sends as sip:foo@*.invalid:0) with the real socket address. Without
+; this re-INVITEs and Hangups can't reach the WS contact.
+rewrite_contact=yes
+; rtp_symmetric=true sends RTP back to the source the packets came from rather
+; than to the SDP-advertised address (which behind NAT is wrong).
+rtp_symmetric=yes
+force_rport=yes
+
+[{ext}]
+type=auth
+auth_type=userpass
+username={ext}
+password={password}
+
+[{ext}]
+type=aor
+max_contacts=5
+; remove_existing=no: on a reconnect race we want the OLD contact to survive
+; long enough that an incoming Dial can still ring SOMETHING — otherwise the
+; INVITE goes into the void during Doze-induced re-register (~10s window).
+remove_existing=no
+; default_expiration=120: extends contact lifetime so a single 60-90s mobile
+; sleep (Doze, Wi-Fi/LTE switch) doesn't immediately invalidate the AOR.
+default_expiration=120
+; qualify_frequency=0: do NOT poll the WS contact with OPTIONS. Mobile in
+; Doze can't answer those — and a missed OPTIONS marks the contact
+; Unreachable, defeating the longer expiration above.
+qualify_frequency=0
+; === end webrtc: {ext} ===
+"""
+
+
+def _write_pjsip_webrtc_from_records(records: list[tuple[str, str]]) -> None:
+    """Atomically rewrite pjsip_webrtc.conf from (extension, password) pairs."""
+    conf_path = settings.asterisk_pjsip_webrtc_conf
+    lines = [
+        "; === pjsip_webrtc.conf — generated by intercom-server ===",
+        "; DO NOT EDIT MANUALLY",
+        "",
+    ]
+    for ext, password in sorted(records):
+        lines.append(_WEBRTC_BLOCK_TMPL.format(ext=ext, password=password))
+
+    content = "\n".join(lines)
+    _atomic_write(conf_path, content)
+
+
+def _atomic_write(path: str, content: str) -> None:
+    """Write *content* to *path*. Prefers atomic temp+rename; falls back to a
+    direct truncate+write when *path* is a Docker bind-mount of a single file
+    (in which case ``os.replace`` raises EBUSY — the bind-mount pins the inode
+    and rename cannot swap it).
+    """
+    dir_name = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        try:
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            if exc.errno != 16:  # EBUSY only — re-raise everything else
+                raise
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+# Debounce state for PJSIP reload — avoids 50 reloads on mass migration.
+_pjsip_reload_task: Optional[asyncio.Task] = None
+_PJSIP_RELOAD_DEBOUNCE = 1.5  # seconds
+
+
+async def _debounced_pjsip_reload() -> None:
+    global _pjsip_reload_task
+    await asyncio.sleep(_PJSIP_RELOAD_DEBOUNCE)
+    _pjsip_reload_task = None
+    _do_pjsip_reload()
+
+
+def _do_pjsip_reload() -> tuple[bool, str]:
+    """Reload res_pjsip.so — try AMI first, then docker exec."""
+    ok, msg = _reload_via_ami("module reload res_pjsip.so")
+    if ok:
+        logger.info("pjsip_reloaded", method="ami")
+        return True, msg
+    ok2, msg2 = _reload_via_docker_exec()
+    if ok2:
+        logger.info("pjsip_reloaded", method="docker_exec")
+        return True, msg2
+    logger.warning("pjsip_reload_failed", ami=msg, docker=msg2)
+    return False, f"AMI: {msg} | docker: {msg2}"
+
+
+def schedule_pjsip_reload() -> None:
+    """Schedule a debounced PJSIP reload (safe to call many times in a row)."""
+    global _pjsip_reload_task
+    if _pjsip_reload_task and not _pjsip_reload_task.done():
+        _pjsip_reload_task.cancel()
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            _pjsip_reload_task = loop.create_task(_debounced_pjsip_reload())
+    except RuntimeError:
+        pass
+
+
+async def upsert_webrtc_conf(extension: str, password: str) -> tuple[bool, str]:
+    """Add/replace one endpoint in pjsip_webrtc.conf (atomic + debounced reload).
+
+    Reads the existing file, replaces the block for *extension* (or appends it),
+    writes atomically, then schedules a debounced reload.
+    """
+    conf_path = settings.asterisk_pjsip_webrtc_conf
+
+    try:
+        with open(conf_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = "; === pjsip_webrtc.conf — generated by intercom-server ===\n; DO NOT EDIT MANUALLY\n\n"
+    except Exception as exc:
+        return False, f"Cannot read {conf_path}: {exc}"
+
+    start_marker = f"; === webrtc: {extension} ==="
+    end_marker = f"; === end webrtc: {extension} ==="
+    new_block = _WEBRTC_BLOCK_TMPL.format(ext=extension, password=password)
+
+    if start_marker in text:
+        s = text.find(start_marker)
+        e = text.find(end_marker)
+        if e != -1:
+            text = text[:s] + new_block.rstrip() + "\n" + text[e + len(end_marker) :]
+        else:
+            text = text[:s] + new_block + text[s + len(start_marker) :]
+    else:
+        text = text.rstrip("\n") + "\n\n" + new_block
+
+    try:
+        _atomic_write(conf_path, text)
+    except Exception as exc:
+        return False, f"Cannot write {conf_path}: {exc}"
+
+    schedule_pjsip_reload()
+    return True, "OK"
+
+
+async def regenerate_webrtc_conf_from_db() -> None:
+    """Re-create pjsip_webrtc.conf from the webrtc_endpoints table (self-healing at startup)."""
+    from sqlalchemy import select
+
+    from app.db.session import AsyncSessionLocal
+    from app.models import WebrtcEndpoint
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(WebrtcEndpoint))
+        rows = result.scalars().all()
+
+    records = [(r.extension, r.password) for r in rows]
+    if not records:
+        return
+    conf_path = settings.asterisk_pjsip_webrtc_conf
+    try:
+        _write_pjsip_webrtc_from_records(records)
+        logger.info("pjsip_webrtc_conf_regenerated", endpoints=len(records), path=conf_path)
+        _do_pjsip_reload()
+    except Exception as exc:
+        logger.error("pjsip_webrtc_conf_regen_failed", error=str(exc))
+
+
+# ─── extensions_apartments.conf management ───────────────────────────────────
+
+_DIALPLAN_BLOCK_TMPL = """\
+; === apt: {call_code} ===
+exten => {call_code},1,NoOp(Call to apartment {call_code})
+ ; __CALL_ID / __APARTMENT_CODE are inherited channel variables — they let
+ ; the cloud re_invite_apartment handler find this exact panel channel later
+ ; (e.g. after a mobile Doze wake-up) via AMI Status / Getvar.
+ same => n,Set(__CALL_ID=${{UNIQUEID}})
+ same => n,Set(__APARTMENT_CODE={call_code})
+ same => n,Dial({dial_str},30,tT)
+ same => n,Hangup()
+; === end apt: {call_code} ===
+"""
+
+_DIALPLAN_EMPTY_TMPL = """\
+; === apt: {call_code} ===
+exten => {call_code},1,NoOp(Call to apartment {call_code} — no monitors)
+ same => n,Set(__CALL_ID=${{UNIQUEID}})
+ same => n,Set(__APARTMENT_CODE={call_code})
+ same => n,Hangup()
+; === end apt: {call_code} ===
+"""
+
+
+def write_apartments_dialplan(
+    apartments: list[dict],
+) -> ActionResult:
+    """Write /etc/asterisk/extensions_apartments.conf from apartment dicts.
+
+    Each dict: {"call_code": "1042", "monitors": ["ext1", "ext2"]}
+    Atomic write; reloads dialplan via docker exec.
+    """
+    conf_path = settings.asterisk_extensions_apartments_conf
+
+    header = (
+        "; === extensions_apartments.conf — generated by intercom-server ===\n"
+        "; DO NOT EDIT MANUALLY\n\n"
+        "[intercom-apartments]\n"
+    )
+    blocks: list[str] = [header]
+
+    for apt in sorted(apartments, key=lambda a: a["call_code"]):
+        call_code = apt["call_code"]
+        monitors: list[str] = apt.get("monitors", [])
+        if monitors:
+            dial_str = "&".join(f"PJSIP/{m}" for m in monitors)
+            block = _DIALPLAN_BLOCK_TMPL.format(call_code=call_code, dial_str=dial_str)
+        else:
+            block = _DIALPLAN_EMPTY_TMPL.format(call_code=call_code)
+        blocks.append(block)
+
+    content = "\n".join(blocks) + "\n"
+
+    try:
+        _atomic_write(conf_path, content)
+    except Exception as exc:
+        return ActionResult(
+            success=False, message=f"Cannot write {conf_path}", detail=str(exc)
+        )
+
+    ok, msg = _reload_via_docker_exec_dialplan()
+    if ok:
+        return ActionResult(
+            success=True,
+            message=f"extensions_apartments.conf updated ({len(apartments)} apt), dialplan reloaded",
+        )
+    return ActionResult(
+        success=False,
+        message="extensions_apartments.conf written, dialplan reload failed",
+        detail=msg,
+    )
+

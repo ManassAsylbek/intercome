@@ -11,8 +11,14 @@ import type {
   DeviceCreate,
   DeviceListOut,
   DeviceUpdate,
+  Entrance,
   HealthOut,
   LoginRequest,
+  Plate,
+  PlateAccessLogListOut,
+  PlateCreate,
+  PlateListOut,
+  PlateUpdate,
   RoutingRule,
   RoutingRuleCreate,
   RoutingRuleListOut,
@@ -89,6 +95,28 @@ export const routingApi = {
   delete: (id: number) => apiClient.delete(`/routing-rules/${id}`),
 };
 
+// ─── Plates (parking ANPR whitelist) ──────────────────────────────────────────
+
+export const platesApi = {
+  list: () => apiClient.get<PlateListOut>("/plates").then((r) => r.data),
+
+  get: (id: number) =>
+    apiClient.get<Plate>(`/plates/${id}`).then((r) => r.data),
+
+  create: (data: PlateCreate) =>
+    apiClient.post<Plate>("/plates", data).then((r) => r.data),
+
+  update: (id: number, data: PlateUpdate) =>
+    apiClient.put<Plate>(`/plates/${id}`, data).then((r) => r.data),
+
+  delete: (id: number) => apiClient.delete(`/plates/${id}`),
+
+  log: (limit = 100) =>
+    apiClient
+      .get<PlateAccessLogListOut>("/plates/log", { params: { limit } })
+      .then((r) => r.data),
+};
+
 // ─── Apartments ───────────────────────────────────────────────────────────────
 
 export const apartmentsApi = {
@@ -110,6 +138,13 @@ export const apartmentsApi = {
     apiClient
       .post<ActionResult>("/apartments/sync-dialplan")
       .then((r) => r.data),
+};
+
+// ─── Entrances (read-only, mirrored from cloud bootstrap_snapshot) ───────────
+
+export const entrancesApi = {
+  list: () =>
+    apiClient.get<Entrance[]>("/entrances").then((r) => r.data),
 };
 
 // ─── Dashboard / System ───────────────────────────────────────────────────────

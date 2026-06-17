@@ -46,66 +46,46 @@ async def _seed_admin() -> None:
             logger.info("admin_user_exists", username=settings.admin_username)
 
 
-async def _seed_sample_devices() -> None:
-    """Seed sample door station and home station on first run."""
-    from sqlalchemy import select
-
-    from app.db.session import AsyncSessionLocal
-    from app.models import Device, DeviceType, UnlockMethod
-
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Device))
-        if result.scalars().first() is not None:
-            return  # Already seeded
-
-        door_station = Device(
-            name="Front Door Station",
-            device_type=DeviceType.DOOR_STATION,
-            ip_address="192.168.31.31",
-            web_port=8000,
-            enabled=True,
-            notes="Leelen-compatible door station at front entrance",
-            sip_enabled=True,
-            sip_account="door001",
-            sip_password="sip123456",
-            sip_server="192.168.31.132",
-            sip_port=5060,
-            rtsp_enabled=True,
-            rtsp_url="rtsp://admin:123456@192.168.31.31:554/h264",
-            unlock_enabled=True,
-            unlock_method=UnlockMethod.HTTP_GET,
-            unlock_url="http://192.168.31.31:8000/unlock",
-            unlock_username="admin",
-            unlock_password="123456",
-        )
-        home_station = Device(
-            name="Living Room Home Station",
-            device_type=DeviceType.HOME_STATION,
-            ip_address="192.168.31.100",
-            web_port=80,
-            enabled=True,
-            notes="Leelen-compatible home station in living room",
-            sip_enabled=True,
-            sip_account="home001",
-            sip_password="sip123456",
-            sip_server="192.168.31.132",
-            sip_port=5060,
-        )
-        db.add(door_station)
-        db.add(home_station)
-        await db.commit()
-        logger.info("sample_devices_seeded")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("startup", env=settings.app_env)
     await create_tables()
     await _seed_admin()
-    # Sample devices removed — add real devices via UI
 
-    # Start background polling
+    # Self-healing: regenerate pjsip_webrtc.conf from DB on every start
+    from app.services.sip_service import regenerate_webrtc_conf_from_db
+    await regenerate_webrtc_conf_from_db()
+
+    # Start AMI listener (Asterisk Manager Interface)
+    from app.ami.client import ami_client
+    from app.ami.consumer import register_all
+    register_all(ami_client)
+    await ami_client.start()
+
+    # Start cloud WebSocket bridge (outgoing persistent connection).
+    # Apply persisted token override first — if cloud has rotated our token
+    # via update_bridge_token, the new value lives in /app/data/, not env.
+    from app.core.runtime_token import apply_persisted_token_override
+    apply_persisted_token_override(settings)
+    from app.cloud.bridge import cloud_bridge
+    await cloud_bridge.start()
+
+    # Durability: replay any apartment_upserted/device_upserted that didn't
+    # get an ack before the previous shutdown. Idempotent on cloud side, so
+    # safe even if we end up double-sending one of them.
+    asyncio.create_task(cloud_bridge.resync_pending(), name="cloud-mirror-resync")
+
+    # Sync RTSP devices into go2rtc (always-on warm connections to panels)
+    from app.services.go2rtc_service import sync_all_from_db
+    await sync_all_from_db()
+
+    # Start background device polling
     polling_task = asyncio.create_task(start_polling())
+
+    # Start ANPR listener — long-poll plate-recognition events from
+    # anpr_enabled cameras and drive the parking barrier.
+    from app.services import anpr_service
+    await anpr_service.start()
 
     yield
 
@@ -114,6 +94,9 @@ async def lifespan(app: FastAPI):
         await polling_task
     except asyncio.CancelledError:
         pass
+
+    await cloud_bridge.close()
+    await ami_client.close()
     logger.info("shutdown")
 
 

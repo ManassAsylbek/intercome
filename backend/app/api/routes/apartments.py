@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models import Apartment, ApartmentMonitor, User
+from app.events.bus import event_bus
+from app.models import Apartment, ApartmentMonitor, Device, User, WebrtcEndpoint
 from app.schemas import (
     ActionResult,
     ApartmentCreate,
@@ -19,38 +22,64 @@ from app.schemas import (
     ApartmentOut,
     ApartmentUpdate,
 )
-from app.services.sip_service import sip_service
+from app.services.sip_service import sip_service, write_apartments_dialplan
 
 router = APIRouter(prefix="/apartments", tags=["apartments"])
 
 
 async def _get_apartment(db: AsyncSession, apt_id: int) -> Apartment | None:
+    # populate_existing: the session uses expire_on_commit=False, so after a
+    # commit the Apartment may still sit in the identity map with a stale
+    # (already-loaded) .monitors collection. Without this flag selectinload
+    # would not overwrite it, and a write endpoint would return / act on the
+    # pre-commit monitor list. populate_existing forces a refresh from the row.
     result = await db.execute(
         select(Apartment)
-        .options(selectinload(Apartment.monitors))
+        .execution_options(populate_existing=True)
+        .options(selectinload(Apartment.monitors), selectinload(Apartment.source_devices))
         .where(Apartment.id == apt_id)
     )
     return result.scalar_one_or_none()
 
 
 async def _rebuild_dialplan(db: AsyncSession) -> None:
-    """Regenerate extensions.conf from all enabled apartments."""
+    """Regenerate extensions_apartments.conf (the WebRTC-aware dialplan).
+
+    NOTE: we no longer touch the main ``extensions.conf`` here. That file
+    has a single ``include => intercom-apartments`` line and is otherwise
+    static; the legacy ``generate_extensions_conf`` path would replace it
+    with hardcoded per-apartment routes that bypass our auto-generated
+    intercom-apartments context. Anything that needs to ring on a call —
+    panel hardware, WebRTC monitor, mobile — already lives in
+    ``apartment_monitors`` and flows through ``write_apartments_dialplan``.
+    """
     result = await db.execute(
         select(Apartment)
+        # populate_existing: same expire_on_commit=False caveat as in
+        # _get_apartment — when called right after a commit in the same
+        # request, apartments cached in the identity map would otherwise
+        # keep their stale .monitors and the dialplan would be regenerated
+        # without the just-added monitors.
+        .execution_options(populate_existing=True)
         .options(selectinload(Apartment.monitors))
         .where(Apartment.enabled == True)  # noqa: E712
         .order_by(Apartment.number)
     )
     apartments = result.scalars().all()
 
-    rules_by_code: dict[str, list[str]] = {}
-    for apt in apartments:
-        if not apt.call_code:
-            continue
-        rules_by_code[apt.call_code] = [m.sip_account for m in apt.monitors]
+    apt_dicts = [
+        {
+            "call_code": apt.call_code,
+            "monitors": [m.sip_account for m in apt.monitors],
+            "cloud_relay_enabled": apt.cloud_relay_enabled,
+            "cloud_sip_account": apt.cloud_sip_account,
+        }
+        for apt in apartments
+        if apt.call_code
+    ]
 
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, sip_service.generate_extensions_conf, rules_by_code)
+    await loop.run_in_executor(None, write_apartments_dialplan, apt_dicts)
 
 
 @router.get("", response_model=ApartmentListOut)
@@ -61,7 +90,7 @@ async def list_apartments(
     total = (await db.execute(select(func.count(Apartment.id)))).scalar_one()
     result = await db.execute(
         select(Apartment)
-        .options(selectinload(Apartment.monitors))
+        .options(selectinload(Apartment.monitors), selectinload(Apartment.source_devices))
         .order_by(Apartment.number)
     )
     items = result.scalars().all()
@@ -79,16 +108,32 @@ async def create_apartment(
         call_code=payload.call_code,
         notes=payload.notes,
         enabled=payload.enabled,
+        floor=payload.floor,
+        entrance_id=payload.entrance_id,
+        cloud_relay_enabled=payload.cloud_relay_enabled,
+        cloud_sip_account=payload.cloud_sip_account,
     )
     db.add(apt)
     await db.flush()
 
     for m in payload.monitors:
-        db.add(ApartmentMonitor(apartment_id=apt.id, sip_account=m.sip_account, label=m.label))
+        db.add(
+            ApartmentMonitor(
+                apartment_id=apt.id,
+                sip_account=m.sip_account,
+                label=m.label,
+                mac_address=m.mac_address,
+                model=m.model,
+                name=m.name,
+            )
+        )
 
     await db.commit()
     apt = await _get_apartment(db, apt.id)
     await _rebuild_dialplan(db)
+    # Mirror to cloud (no-op if called from a cloud-command code path).
+    from app.cloud.bridge import cloud_bridge
+    await cloud_bridge.emit_apartment_upserted(apt.id)
     return apt
 
 
@@ -123,6 +168,14 @@ async def update_apartment(
         apt.notes = payload.notes
     if payload.enabled is not None:
         apt.enabled = payload.enabled
+    if payload.floor is not None:
+        apt.floor = payload.floor
+    if payload.entrance_id is not None:
+        apt.entrance_id = payload.entrance_id
+    if payload.cloud_relay_enabled is not None:
+        apt.cloud_relay_enabled = payload.cloud_relay_enabled
+    if payload.cloud_sip_account is not None:
+        apt.cloud_sip_account = payload.cloud_sip_account
 
     # Replace monitors if provided
     if payload.monitors is not None:
@@ -132,11 +185,22 @@ async def update_apartment(
             )
         )
         for m in payload.monitors:
-            db.add(ApartmentMonitor(apartment_id=apt_id, sip_account=m.sip_account, label=m.label))
+            db.add(
+                ApartmentMonitor(
+                    apartment_id=apt_id,
+                    sip_account=m.sip_account,
+                    label=m.label,
+                    mac_address=m.mac_address,
+                    model=m.model,
+                    name=m.name,
+                )
+            )
 
     await db.commit()
     apt = await _get_apartment(db, apt_id)
     await _rebuild_dialplan(db)
+    from app.cloud.bridge import cloud_bridge
+    await cloud_bridge.emit_apartment_upserted(apt_id)
     return apt
 
 
@@ -162,3 +226,70 @@ async def sync_dialplan(
     """Manually regenerate extensions.conf from current apartments."""
     await _rebuild_dialplan(db)
     return ActionResult(success=True, message="Dialplan синхронизирован")
+
+
+# ─── POST /api/apartments/{call_code}/monitors ────────────────────────────────
+
+
+class MonitorsRequest(BaseModel):
+    monitors: list[str]
+
+
+@router.post("/{call_code}/monitors")
+async def set_apartment_monitors(
+    call_code: str,
+    payload: MonitorsRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Set the list of WebRTC extension(s) that ring when *call_code* is dialled.
+
+    Idempotent — replaces the existing monitor list completely.
+    Validates that every extension exists in webrtc_endpoints.
+    Regenerates extensions_apartments.conf and reloads dialplan.
+    """
+    result = await db.execute(
+        select(Apartment)
+        .options(selectinload(Apartment.monitors))
+        .where(Apartment.call_code == call_code)
+    )
+    apt = result.scalar_one_or_none()
+    if not apt:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Квартира не найдена")
+
+    # Validate all extensions exist in webrtc_endpoints table.
+    unknown: list[str] = []
+    for ext in payload.monitors:
+        res = await db.execute(
+            select(WebrtcEndpoint).where(WebrtcEndpoint.extension == ext)
+        )
+        if not res.scalar_one_or_none():
+            unknown.append(ext)
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown extensions (not provisioned): {', '.join(unknown)}",
+        )
+
+    # Replace monitor list.
+    await db.execute(
+        ApartmentMonitor.__table__.delete().where(ApartmentMonitor.apartment_id == apt.id)
+    )
+    for ext in payload.monitors:
+        db.add(ApartmentMonitor(apartment_id=apt.id, sip_account=ext, label=None))
+    await db.commit()
+
+    # Regenerate dialplan files.
+    await _rebuild_dialplan(db)
+
+    # Optional SSE notification for CRM UI.
+    await event_bus.publish(
+        "monitors_changed",
+        {"apartment": call_code, "monitors": payload.monitors},
+    )
+
+    return {
+        "success": True,
+        "apartment": call_code,
+        "monitors": payload.monitors,
+    }

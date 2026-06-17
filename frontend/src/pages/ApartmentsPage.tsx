@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm, useFieldArray, type SubmitHandler } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -8,24 +8,49 @@ import {
   useUpdateApartment,
   useDeleteApartment,
 } from "@/hooks/useApartments";
+import { useEntrances } from "@/hooks/useEntrances";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
-import { Input, Textarea } from "@/components/ui/FormFields";
+import { Input, Select, Textarea } from "@/components/ui/FormFields";
 import { toast } from "@/components/ui/Toast";
 import type { Apartment } from "@/types";
-import { Building2, Plus, Pencil, Trash2, Phone, X } from "lucide-react";
+import {
+  Building2,
+  Plus,
+  Pencil,
+  Trash2,
+  Phone,
+  X,
+  Cloud,
+  CloudOff,
+  DoorOpen,
+} from "lucide-react";
+import { DEVICE_TYPE_LABELS } from "@/lib/utils";
 
 const monitorSchema = z.object({
   sip_account: z.string().min(1, "Required"),
   label: z.string().nullable().optional(),
+  mac_address: z.string().nullable().optional(),
+  model: z.string().nullable().optional(),
+  name: z.string().nullable().optional(),
 });
 
 const schema = z.object({
   number: z.string().min(1, "Apartment number is required"),
-  call_code: z.string().min(1, "Call code is required"),
+  // call_code это SIP extension — только цифры.
+  call_code: z
+    .string()
+    .min(1, "Код вызова обязателен")
+    .max(16, "Слишком длинный код")
+    .regex(/^\d+$/, "Только цифры (например 1001)"),
+  // Coerce because <select> emits a string.
+  entrance_id: z.coerce.number().int().positive("Подъезд обязателен"),
+  floor: z.coerce.number().int().optional().nullable(),
   notes: z.string().nullable().optional(),
   enabled: z.boolean(),
+  cloud_relay_enabled: z.boolean(),
+  cloud_sip_account: z.string().nullable().optional(),
   monitors: z.array(monitorSchema),
 });
 
@@ -43,6 +68,11 @@ function ApartmentFormModal({
   const isEdit = !!apartment;
   const create = useCreateApartment();
   const update = useUpdateApartment(apartment?.id ?? 0);
+  const {
+    data: entrances,
+    isLoading: entrancesLoading,
+    refetch: refetchEntrances,
+  } = useEntrances();
 
   const {
     register,
@@ -53,18 +83,27 @@ function ApartmentFormModal({
   } = useForm<FormData>({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     resolver: zodResolver(schema) as any,
+    mode: "onBlur",
+    reValidateMode: "onChange",
     defaultValues: apartment
       ? {
           number: apartment.number,
           call_code: apartment.call_code,
+          entrance_id: apartment.entrance_id ?? undefined,
+          floor: apartment.floor ?? undefined,
           notes: apartment.notes ?? "",
           enabled: apartment.enabled,
+          cloud_relay_enabled: apartment.cloud_relay_enabled,
+          cloud_sip_account: apartment.cloud_sip_account ?? "",
           monitors: apartment.monitors.map((m) => ({
             sip_account: m.sip_account,
             label: m.label ?? "",
+            mac_address: m.mac_address ?? "",
+            model: m.model ?? "",
+            name: m.name ?? "",
           })),
         }
-      : { enabled: true, monitors: [] },
+      : { enabled: true, cloud_relay_enabled: false, monitors: [] },
   });
 
   const { fields, append, remove } = useFieldArray({
@@ -72,12 +111,58 @@ function ApartmentFormModal({
     name: "monitors",
   });
 
+  // useForm's defaultValues only initialise on first mount. Closing the modal
+  // does not remount the form, so stale values persist on the next open.
+  // Reset explicitly when the modal opens (or the row being edited changes).
+  // Also force-refetch entrances so a freshly created one (pushed by cloud
+  // via bootstrap_snapshot) appears in the dropdown without a hard reload.
+  useEffect(() => {
+    if (!open) return;
+    refetchEntrances();
+    if (apartment) {
+      reset({
+        number: apartment.number,
+        call_code: apartment.call_code,
+        entrance_id: apartment.entrance_id ?? undefined,
+        floor: apartment.floor ?? undefined,
+        notes: apartment.notes ?? "",
+        enabled: apartment.enabled,
+        cloud_relay_enabled: apartment.cloud_relay_enabled,
+        cloud_sip_account: apartment.cloud_sip_account ?? "",
+        monitors: apartment.monitors.map((m) => ({
+          sip_account: m.sip_account,
+          label: m.label ?? "",
+          mac_address: m.mac_address ?? "",
+          model: m.model ?? "",
+          name: m.name ?? "",
+        })),
+      });
+    } else {
+      reset({
+        number: "",
+        call_code: "",
+        entrance_id: undefined,
+        floor: undefined,
+        notes: "",
+        enabled: true,
+        cloud_relay_enabled: false,
+        cloud_sip_account: "",
+        monitors: [],
+      });
+    }
+  }, [open, apartment, reset]);
+
   const onSubmit: SubmitHandler<FormData> = async (data) => {
     const payload = {
       ...data,
+      // Floor may be NaN if user left the input blank — coerce to null.
+      floor: data.floor && !Number.isNaN(data.floor) ? data.floor : null,
       monitors: data.monitors.map((m) => ({
         sip_account: m.sip_account,
         label: m.label || null,
+        mac_address: m.mac_address || null,
+        model: m.model || null,
+        name: m.name || null,
       })),
     };
     try {
@@ -117,9 +202,42 @@ function ApartmentFormModal({
           <Input
             label="Код вызова"
             placeholder="1001"
-            hint="SIP-номер, набираемый с панели домофона"
+            hint="Только цифры. SIP-номер, набираемый с панели домофона."
+            inputMode="numeric"
+            pattern="[0-9]*"
             {...register("call_code")}
             error={errors.call_code?.message}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <Select
+            label="Подъезд"
+            hint={
+              entrancesLoading
+                ? "Загрузка списка подъездов…"
+                : entrances && entrances.length === 0
+                  ? "Подъезды появятся после первого подключения к облаку"
+                  : "Список приходит из облака (bootstrap_snapshot)"
+            }
+            {...register("entrance_id")}
+            error={errors.entrance_id?.message}
+          >
+            <option value="">— выберите подъезд —</option>
+            {entrances?.map((e) => (
+              <option key={e.id} value={e.id}>
+                Подъезд {e.number}
+                {e.building_address ? ` · ${e.building_address}` : ""}
+              </option>
+            ))}
+          </Select>
+          <Input
+            label="Этаж"
+            placeholder="3"
+            hint="Опционально"
+            type="number"
+            {...register("floor")}
+            error={errors.floor?.message}
           />
         </div>
 
@@ -131,7 +249,15 @@ function ApartmentFormModal({
             </label>
             <button
               type="button"
-              onClick={() => append({ sip_account: "", label: "" })}
+              onClick={() =>
+                append({
+                  sip_account: "",
+                  label: "",
+                  mac_address: "",
+                  model: "",
+                  name: "",
+                })
+              }
               className="flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800 font-medium"
             >
               <Plus className="w-3.5 h-3.5" /> Добавить монитор
@@ -144,25 +270,50 @@ function ApartmentFormModal({
             </p>
           )}
 
-          <div className="space-y-2">
+          <div className="space-y-3">
             {fields.map((field, idx) => (
-              <div key={field.id} className="flex gap-2 items-start">
-                <Input
-                  placeholder="SIP-аккаунт (напр. 1001)"
-                  {...register(`monitors.${idx}.sip_account`)}
-                  error={errors.monitors?.[idx]?.sip_account?.message}
-                />
-                <Input
-                  placeholder="Название (напр. Гостиная)"
-                  {...register(`monitors.${idx}.label`)}
-                />
-                <button
-                  type="button"
-                  onClick={() => remove(idx)}
-                  className="mt-1 p-2 text-gray-400 hover:text-red-500 flex-shrink-0"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+              <div
+                key={field.id}
+                className="rounded-lg border border-gray-200 p-3 space-y-2 bg-gray-50/50"
+              >
+                <div className="flex items-start justify-between">
+                  <span className="text-xs text-gray-500">
+                    Монитор #{idx + 1}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => remove(idx)}
+                    className="p-1 text-gray-400 hover:text-red-500 flex-shrink-0"
+                    title="Удалить монитор"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    placeholder="SIP-аккаунт (напр. 1001)"
+                    {...register(`monitors.${idx}.sip_account`)}
+                    error={errors.monitors?.[idx]?.sip_account?.message}
+                  />
+                  <Input
+                    placeholder="MAC-адрес (для cloud upsert)"
+                    {...register(`monitors.${idx}.mac_address`)}
+                  />
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <Input
+                    placeholder="Имя (напр. Гостиная)"
+                    {...register(`monitors.${idx}.name`)}
+                  />
+                  <Input
+                    placeholder="Модель"
+                    {...register(`monitors.${idx}.model`)}
+                  />
+                  <Input
+                    placeholder="Метка (label)"
+                    {...register(`monitors.${idx}.label`)}
+                  />
+                </div>
               </div>
             ))}
           </div>
@@ -177,6 +328,32 @@ function ApartmentFormModal({
             />
             <span className="text-sm text-gray-700">Активна</span>
           </label>
+        </div>
+
+        {/* Cloud relay */}
+        <div className="rounded-lg border border-blue-100 bg-blue-50 p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <Cloud className="w-4 h-4 text-blue-500" />
+            <span className="text-sm font-medium text-blue-800">
+              Облачная переадресация
+            </span>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              {...register("cloud_relay_enabled")}
+              className="rounded border-gray-300 text-blue-600"
+            />
+            <span className="text-sm text-gray-700">
+              Пересылать звонок в облако → мобильным пользователям
+            </span>
+          </label>
+          <Input
+            label="SIP-аккаунт на облачном транке"
+            placeholder="42 (по умолчанию = код вызова)"
+            hint="Оставьте пустым — будет использован код вызова квартиры"
+            {...register("cloud_sip_account")}
+          />
         </div>
 
         <Textarea
@@ -262,7 +439,16 @@ export function ApartmentsPage() {
                   Код вызова
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
+                  Источники
+                </th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
                   Мониторы
+                </th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
+                  Облако
+                </th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
+                  Cloud sync
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">
                   Статус
@@ -295,6 +481,24 @@ export function ApartmentsPage() {
                     </span>
                   </td>
                   <td className="px-4 py-4">
+                    {apt.source_devices.length === 0 ? (
+                      <span className="text-xs text-gray-400">—</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1">
+                        {apt.source_devices.map((d) => (
+                          <span
+                            key={d.id}
+                            title={DEVICE_TYPE_LABELS[d.device_type]}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 bg-orange-50 text-orange-700 rounded text-xs"
+                          >
+                            <DoorOpen className="w-3 h-3" />
+                            {d.name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-4">
                     {apt.monitors.length === 0 ? (
                       <span className="text-xs text-gray-400">
                         Только браузер
@@ -316,6 +520,36 @@ export function ApartmentsPage() {
                           </span>
                         ))}
                       </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-4">
+                    {apt.cloud_relay_enabled ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs">
+                        <Cloud className="w-3 h-3" />{" "}
+                        {apt.cloud_sip_account || apt.call_code}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-400">Отключено</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-4">
+                    {apt.cloud_synced ? (
+                      <span
+                        title={`cloud_id=${apt.cloud_id ?? "—"}`}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 bg-green-50 text-green-700 rounded text-xs"
+                      >
+                        <Cloud className="w-3 h-3" /> synced
+                      </span>
+                    ) : (
+                      <span
+                        title={
+                          apt.last_cloud_sync_error ??
+                          "ожидает sync — нет entrance_id или нет связи с облаком"
+                        }
+                        className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-50 text-red-700 rounded text-xs"
+                      >
+                        <CloudOff className="w-3 h-3" /> pending
+                      </span>
                     )}
                   </td>
                   <td className="px-4 py-4">

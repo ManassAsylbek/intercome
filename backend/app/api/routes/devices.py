@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -16,10 +16,20 @@ from app.schemas import (
     DeviceListOut,
     DeviceOut,
     DeviceUpdate,
+    QrScanRequest,
     SipApplyRequest,
 )
-from app.services import connectivity_service, device_service, unlock_service
+from app.services import (
+    connectivity_service,
+    device_service,
+    go2rtc_service,
+    qr_service,
+    unlock_service,
+)
 from app.services.sip_service import sip_service
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -46,6 +56,17 @@ async def create_device(
     current_user: User = Depends(get_current_user),
 ):
     device = await device_service.create_device(db, payload, actor=current_user.username)
+    # Commit before side effects: emit_device_upserted opens its own session and
+    # writes devices.cloud_synced — if the request transaction is still open
+    # it holds a row lock on this device and the two sessions self-deadlock.
+    # Committing first also makes the row visible so the device actually
+    # mirrors to cloud / appears in the go2rtc rebuild (both open fresh
+    # sessions). go2rtc.write_config() is a full DB rebuild — calling it
+    # unconditionally keeps go2rtc.yaml in sync for any device change.
+    await db.commit()
+    await go2rtc_service.write_config()
+    from app.cloud.bridge import cloud_bridge
+    await cloud_bridge.emit_device_upserted(device.id)
     return device
 
 
@@ -72,6 +93,12 @@ async def update_device(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     device = await device_service.update_device(db, device, payload, actor=current_user.username)
+    # Commit before side effects — see create_device: emit and the go2rtc
+    # rebuild both open second sessions and need the committed row.
+    await db.commit()
+    await go2rtc_service.write_config()
+    from app.cloud.bridge import cloud_bridge
+    await cloud_bridge.emit_device_upserted(device.id)
     return device
 
 
@@ -85,6 +112,33 @@ async def delete_device(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     await device_service.delete_device(db, device, actor=current_user.username)
+    # Commit before the go2rtc rebuild: write_config() opens a fresh session
+    # and must not see the just-deleted row.
+    await db.commit()
+    await go2rtc_service.write_config()
+
+
+@router.post("/{device_id}/barrier/open", response_model=ActionResult)
+async def open_barrier(
+    device_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Manually open the parking barrier — pulses the camera's AlarmOut relay.
+
+    The whitelist auto-opens via anpr_service; this is the operator override.
+    """
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    from app.drivers import get_driver
+
+    driver = get_driver(device)
+    ok = "open_barrier" in driver.capabilities() and bool(await driver.open(device, kind="barrier"))
+    return ActionResult(
+        success=ok,
+        message="Шлагбаум открыт" if ok else "Не удалось открыть шлагбаум",
+    )
 
 
 @router.post("/{device_id}/test-connection", response_model=ActionResult)
@@ -108,7 +162,9 @@ async def test_unlock(
     device = await device_service.get_device(db, device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    return await unlock_service.test_unlock(device, db=db, actor=current_user.username)
+    from app.drivers import get_driver
+
+    return await get_driver(device).open(device, kind="door", db=db, actor=current_user.username)
 
 
 @router.post("/{device_id}/sip-apply", response_model=ActionResult)
@@ -157,3 +213,52 @@ async def sip_status(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return await sip_service.get_peer_status(device.sip_account or str(device_id))
+
+
+@router.post("/{device_id}/qr-scan", response_model=dict)
+async def qr_scan(
+    device_id: int,
+    payload: QrScanRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Тест/producer-заглушка: панель прочитала QR → форвардим в облако событием
+    ``qr_scanned`` (только коды с префиксом DMF1:). Открытие двери приходит обратно
+    существующей командой unlock_door. Реальный продюсер (подписка на event-stream
+    сканера панели) — TODO, зависит от модели домофона; он должен вызывать тот же
+    qr_service.handle_scan."""
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return await qr_service.handle_scan(
+        code=payload.code,
+        device_local_id=device.id,
+        scanned_at=payload.scanned_at,
+    )
+
+
+@router.api_route("/qr/scan", methods=["GET", "POST"])
+async def qr_http_capture(request: Request):
+    """CAPTURE-заглушка для режима панели «third-party HTTP API / server validation».
+
+    Наводим server-URL панели на этот endpoint — он логирует ВСЁ, что прислала панель
+    (метод, query, тело, content-type, IP), чтобы понять точный формат запроса и ждёт
+    ли панель ответ (sync) или просто шлёт (async). БЕЗ авторизации (панель Bearer не
+    шлёт). Дверь пока НЕ открывает (фаза захвата). Когда формат известен — подключим к
+    qr_service.handle_scan.
+    """
+    raw = b""
+    try:
+        raw = await request.body()
+    except Exception:
+        pass
+    logger.info(
+        "qr_http_capture",
+        method=request.method,
+        path=request.url.path,
+        query=dict(request.query_params),
+        client=request.client.host if request.client else None,
+        content_type=request.headers.get("content-type"),
+        body=raw.decode("utf-8", "replace")[:1024],
+    )
+    return {"result": "ok"}
