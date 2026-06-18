@@ -297,6 +297,8 @@ class CloudBridge:
             "plate_delete": self._cmd_plate_delete,
             "unlock_door": self._cmd_unlock_door,
             "open_barrier": self._cmd_open_barrier,
+            "enroll_face": self._cmd_enroll_face,
+            "delete_face": self._cmd_delete_face,
             "reject_call": self._cmd_reject_call,
             "answer_call": self._cmd_answer_call,
             "re_invite_apartment": self._cmd_re_invite_apartment,
@@ -1407,6 +1409,69 @@ class CloudBridge:
             response["unlocked"] = True  # legacy/back-compat
 
         return response
+
+    async def _cmd_enroll_face(self, data: dict, **_) -> dict:
+        """Enroll a face on a door device so LOCAL recognition opens the door.
+
+        Cloud sends the photo as base64 (``image_b64``) plus the person identity +
+        optional validity window; the vendor driver creates the person and uploads
+        the face to the device's face library. Vendor-agnostic — only drivers that
+        advertise ``enroll_face`` (Hikvision today) handle it.
+        """
+        from app.db.session import AsyncSessionLocal
+        from app.drivers import get_driver
+        from app.models import Device
+
+        data = data or {}
+        device_local_id = data.get("device_local_id")
+        person_id = data.get("person_id")
+        if not device_local_id or not person_id:
+            raise RuntimeError("device_local_id and person_id are required")
+
+        async with AsyncSessionLocal() as db:
+            device = await db.get(Device, device_local_id)
+            if not device:
+                return {"success": False, "message": f"device_local_id={device_local_id} not found"}
+            driver = get_driver(device)
+            if "enroll_face" not in driver.capabilities():
+                return {
+                    "success": False,
+                    "message": f"vendor '{device.vendor}' has no enroll_face",
+                    "device_id": device.id,
+                }
+            return await driver.enroll_face(
+                device,
+                person_id=str(person_id),
+                image_b64=data.get("image_b64"),
+                name=data.get("name"),
+                valid_from=data.get("valid_from"),
+                valid_to=data.get("valid_to"),
+            )
+
+    async def _cmd_delete_face(self, data: dict, **_) -> dict:
+        """Revoke an enrolled face by person_id (deletes the on-device person)."""
+        from app.db.session import AsyncSessionLocal
+        from app.drivers import get_driver
+        from app.models import Device
+
+        data = data or {}
+        device_local_id = data.get("device_local_id")
+        person_id = data.get("person_id")
+        if not device_local_id or not person_id:
+            raise RuntimeError("device_local_id and person_id are required")
+
+        async with AsyncSessionLocal() as db:
+            device = await db.get(Device, device_local_id)
+            if not device:
+                return {"success": False, "message": f"device_local_id={device_local_id} not found"}
+            driver = get_driver(device)
+            if "delete_face" not in driver.capabilities():
+                return {
+                    "success": False,
+                    "message": f"vendor '{device.vendor}' has no delete_face",
+                    "device_id": device.id,
+                }
+            return await driver.delete_face(device, person_id=str(person_id))
 
     async def _cmd_open_barrier(self, data: dict, **_) -> dict:
         """Pulse the AlarmOut relay on an ANPR camera to raise the barrier.
