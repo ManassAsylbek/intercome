@@ -87,6 +87,11 @@ async def lifespan(app: FastAPI):
     from app.services import anpr_service
     await anpr_service.start()
 
+    # Start Hikvision alertStream listeners — emit door_unlocked audit events
+    # when a face is recognized at an enabled Hikvision door station.
+    from app.services import hik_event_service
+    await hik_event_service.start()
+
     yield
 
     polling_task.cancel()

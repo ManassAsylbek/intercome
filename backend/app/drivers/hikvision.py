@@ -11,8 +11,12 @@ alertStream (``GET /ISAPI/Event/notification/alertStream``) — not implemented 
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import hashlib
 import json
+import os
+import re
 import time
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
@@ -33,6 +37,24 @@ _DOOR_OPEN_BODY = "<RemoteControlDoor><cmd>open</cmd></RemoteControlDoor>"
 #: On-device face library (GET /ISAPI/Intelligent/FDLib?format=json → FDID "1", blackFD).
 _FACE_LIB_TYPE = "blackFD"
 _FACE_FDID = "1"
+
+#: alertStream audit (face recognition → door_unlocked). subEventType 75 = face
+#: access GRANTED (carries employeeNoString); 76 = denied. Stream is multipart/mixed
+#: with literal boundary "MIME_boundary", JSON parts, plus videoloss keepalives.
+_ALERTSTREAM_PATH = "/ISAPI/Event/notification/alertStream"
+_ALERTSTREAM_BOUNDARY = b"--MIME_boundary"
+_RECONNECT_DELAY = 10.0
+_MAX_BUFFER = 524288  # 512KB guard against unbounded growth on a never-boundaried part
+#: On (re)connect the device REPLAYS recent backlog immediately. We suppress that
+#: burst clock-independently: on the FIRST connect, ignore grants for the first
+#: _WARMUP_S seconds (the device clock is often badly skewed from ours, so an
+#: absolute-time "is it old?" check is unreliable). serialNo dedupe handles replays
+#: on later reconnects.
+_WARMUP_S = 8.0
+#: dedupe (device_id, serialNo) — module-level so it survives listener respawns.
+_seen_grants: set[tuple[int, object]] = set()
+#: device_ids that already passed their first-connect warmup (process lifetime).
+_warmed: set[int] = set()
 
 
 def _admin_credentials(device: "Device") -> tuple[str, str]:
@@ -56,13 +78,34 @@ def _isapi_json_ok(resp) -> bool:
         return False
 
 
+def _digest_header(user: str, pwd: str, method: str, uri: str, www_authenticate: str) -> str:
+    """Build an HTTP Digest Authorization header from a WWW-Authenticate challenge.
+
+    httpx.DigestAuth works for normal ISAPI calls but misbehaves on the long-poll
+    alertStream (returns 401/500), so the event listener does the digest handshake
+    by hand (qop=auth, MD5) exactly like curl --digest."""
+    p = dict(re.findall(r'(\w+)="?([^",]*)"?', www_authenticate))
+    realm, nonce = p.get("realm", ""), p.get("nonce", "")
+    qop, opaque = p.get("qop", "auth"), p.get("opaque", "")
+    ha1 = hashlib.md5(f"{user}:{realm}:{pwd}".encode()).hexdigest()
+    ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+    nc, cnonce = "00000001", hashlib.md5(os.urandom(8)).hexdigest()[:16]
+    resp = hashlib.md5(f"{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}".encode()).hexdigest()
+    h = (
+        f'Digest username="{user}", realm="{realm}", nonce="{nonce}", uri="{uri}", '
+        f'response="{resp}", qop={qop}, nc={nc}, cnonce="{cnonce}"'
+    )
+    if opaque:
+        h += f', opaque="{opaque}"'
+    return h
+
+
 class HikvisionDriver(AccessDriver):
     vendor = "hikvision"
 
     def capabilities(self) -> set[str]:
-        # Door open + on-device face credential management via ISAPI.
-        # Barrier / QR / event-stream come later.
-        return {"open_door", "enroll_face", "delete_face"}
+        # Door open + on-device face credential management + access-event audit.
+        return {"open_door", "enroll_face", "delete_face", "event_stream"}
 
     async def open(self, device: "Device", *, kind: str = "door", db=None, actor: str = "system"):
         from app.schemas import ActionResult  # lazy: avoid pulling schemas at import
@@ -266,3 +309,124 @@ class HikvisionDriver(AccessDriver):
             "detail": resp.text[:300] if resp.text else None,
             "person_id": person_id,
         }
+
+    async def run_event_stream(self, device: "Device") -> None:
+        """Long-poll the ISAPI alertStream and emit ``door_unlocked`` on face grants.
+
+        Mirrors ``anpr_service._listen``: infinite reconnect loop, a finite read
+        timeout (> the device heartbeat) turns a dead TCP into a recoverable
+        ReadTimeout, and CancelledError is re-raised so the supervisor can stop it.
+
+        The stream is multipart/mixed (boundary ``MIME_boundary``) of JSON parts.
+        A face access-GRANT is ``AccessControllerEvent.majorEventType==5`` and
+        ``subEventType==75`` (76 = denied; videoloss parts are keepalives). The
+        device REPLAYS recent backlog on every (re)connect, so we dedupe by
+        serialNo AND skip grants older than ``_BACKLOG_GRACE_S`` to avoid
+        re-emitting old opens after a restart.
+        """
+        if not device.ip_address:
+            return
+        user, pwd = _admin_credentials(device)
+        url = f"http://{device.ip_address}:{device.web_port or 80}{_ALERTSTREAM_PATH}"
+
+        while True:
+            try:
+                timeout = httpx.Timeout(10.0, read=45.0)
+                async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+                    # Manual digest: httpx.DigestAuth fails on this long-poll stream
+                    # (401/500) though it works for normal ISAPI calls. Fetch the 401
+                    # challenge, then open the stream with a computed Authorization.
+                    challenge = await client.get(url)
+                    www = challenge.headers.get("WWW-Authenticate", "")
+                    if challenge.status_code != 401 or not www:
+                        logger.warning(
+                            "hik_alertstream_no_challenge",
+                            device_id=device.id, status=challenge.status_code,
+                        )
+                        await asyncio.sleep(_RECONNECT_DELAY)
+                        continue
+                    authz = _digest_header(user, pwd, "GET", _ALERTSTREAM_PATH, www)
+                    async with client.stream(
+                        "GET", url, headers={"Authorization": authz}
+                    ) as resp:
+                        if resp.status_code != 200:
+                            logger.warning(
+                                "hik_alertstream_bad_status",
+                                device_id=device.id, status=resp.status_code,
+                            )
+                            await asyncio.sleep(_RECONNECT_DELAY)
+                            continue
+                        logger.info(
+                            "hik_alertstream_listening", device_id=device.id, host=device.ip_address
+                        )
+                        # First connect of this process: suppress the replayed
+                        # backlog burst for a short window (clock-independent).
+                        first = device.id not in _warmed
+                        _warmed.add(device.id)
+                        suppress_until = (time.monotonic() + _WARMUP_S) if first else 0.0
+                        buf = b""
+                        async for chunk in resp.aiter_bytes():
+                            buf += chunk
+                            # split on boundary; the last segment may be a partial part
+                            segments = buf.split(_ALERTSTREAM_BOUNDARY)
+                            buf = segments.pop()
+                            for seg in segments:
+                                await self._handle_alertstream_segment(device, seg, suppress_until)
+                            if len(buf) > _MAX_BUFFER:  # never-boundaried garbage/binary
+                                buf = b""
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("hik_alertstream_error", device_id=device.id, error=str(exc))
+            await asyncio.sleep(_RECONNECT_DELAY)
+
+    async def _handle_alertstream_segment(
+        self, device: "Device", seg: bytes, suppress_until: float
+    ) -> None:
+        """Parse one multipart segment; emit door_unlocked iff it is a fresh face grant.
+
+        ``suppress_until`` is a ``time.monotonic()`` deadline: grants seen before it
+        are treated as replayed backlog (first-connect warmup) — recorded as seen but
+        not emitted. serialNo dedupe suppresses replays on later reconnects."""
+        i = seg.find(b"{")
+        if i < 0:
+            return
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(seg[i:].decode("utf-8", "replace"))
+        except Exception:
+            return
+        if not isinstance(obj, dict) or obj.get("eventType") != "AccessControllerEvent":
+            return  # videoloss/inactive keepalive or non-access part
+        ace = obj.get("AccessControllerEvent") or {}
+        if ace.get("majorEventType") != 5 or ace.get("subEventType") != 75:
+            return  # not a face access-GRANT (76 = denied; door-state codes; ...)
+
+        serial = ace.get("serialNo")
+        key = (device.id, serial)
+        if serial is not None and key in _seen_grants:
+            return  # already handled (stream replays backlog on reconnect)
+        if serial is not None:
+            if len(_seen_grants) > 2000:
+                _seen_grants.clear()
+            _seen_grants.add(key)
+
+        if time.monotonic() < suppress_until:
+            return  # first-connect backlog burst — recorded as seen, not emitted
+
+        employee = ace.get("employeeNoString") or obj.get("employeeNoString") or ""
+        name = ace.get("name") or obj.get("name") or None
+        ts = obj.get("dateTime")  # device-clock timestamp (may be skewed; informational)
+        await self._emit(
+            device,
+            "door_unlocked",
+            {
+                "actor": employee or "unknown",
+                "method": "face",
+                "person_id": employee or None,
+                "name": name,
+                "ts": ts,
+            },
+        )
+        logger.info(
+            "hik_face_door_unlocked", device_id=device.id, person_id=employee or None, ts=ts
+        )
