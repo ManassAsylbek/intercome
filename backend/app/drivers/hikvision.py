@@ -152,6 +152,10 @@ class HikvisionDriver(AccessDriver):
             return {"success": False, "message": "person_id must not contain '_'"}
         if not image_b64:
             return {"success": False, "message": "image_b64 (face photo) is required"}
+        # Guard before the synchronous decode: an oversized/malformed payload must
+        # not block the bridge event loop. A face JPEG is well under this (~70KB).
+        if len(image_b64) > 10_000_000:
+            return {"success": False, "message": "image_b64 too large (>10MB)"}
         try:
             image_bytes = base64.b64decode(image_b64)
         except Exception as exc:
