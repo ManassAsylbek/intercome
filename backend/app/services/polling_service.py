@@ -20,7 +20,7 @@ from app.services.connectivity_service import test_connection
 
 logger = get_logger(__name__)
 
-POLL_INTERVAL_SECONDS = 60  # how often to poll all devices
+POLL_INTERVAL_SECONDS = 30  # how often to poll all devices (online/offline detection lag)
 
 
 async def _poll_once() -> None:

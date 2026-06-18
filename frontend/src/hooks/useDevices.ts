@@ -11,6 +11,9 @@ export function useDevices(params?: {
   return useQuery({
     queryKey: [...DEVICES_KEY, params],
     queryFn: () => devicesApi.list(params),
+    // Auto-refresh so online/offline badges reflect backend polling without a
+    // manual page reload (the backend marks is_online every poll cycle).
+    refetchInterval: 20_000,
   });
 }
 
@@ -19,6 +22,7 @@ export function useDevice(id: number) {
     queryKey: [...DEVICES_KEY, id],
     queryFn: () => devicesApi.get(id),
     enabled: !!id,
+    refetchInterval: 20_000,
   });
 }
 
