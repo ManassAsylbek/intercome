@@ -814,6 +814,11 @@ class CloudBridge:
                 )
                 return
 
+            # Vendor driver capabilities → tell the cloud what this device can do
+            # (e.g. whether it can recognize faces, so the app shows the feature).
+            from app.drivers import get_driver
+
+            caps = sorted(get_driver(dev).capabilities())
             payload = {
                 "entrance_id": cloud_entrance_id,
                 "device": {
@@ -825,6 +830,8 @@ class CloudBridge:
                     "model": dev.model,
                     "name": dev.name,
                     "local_id": dev.id,
+                    "capabilities": caps,
+                    "can_recognize_face": "enroll_face" in caps,
                 },
             }
 
