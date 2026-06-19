@@ -46,3 +46,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Frigate runtime data (NVR DB, recordings, clips, model cache)
+config/
+storage/
